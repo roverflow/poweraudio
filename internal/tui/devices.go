@@ -21,7 +21,7 @@ func NewDevicesModel() DevicesModel {
 
 func (m DevicesModel) Update(msg tea.Msg) (DevicesModel, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "up", "k":
 			if m.cursor > 0 {

@@ -26,7 +26,7 @@ func NewStatusModel() StatusModel {
 
 func (m StatusModel) Update(msg tea.Msg) (StatusModel, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "i":
 			return m, installServiceCmd()

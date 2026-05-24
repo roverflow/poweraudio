@@ -54,7 +54,7 @@ func (m SetupModel) Init() tea.Cmd {
 
 func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if m.starting {
 			return m, nil
 		}
@@ -87,7 +87,7 @@ func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m SetupModel) View() string {
+func (m SetupModel) View() tea.View {
 	var b strings.Builder
 
 	b.WriteString(styleTitle.Render("poweraudio"))
@@ -103,14 +103,18 @@ func (m SetupModel) View() string {
 	if m.starting {
 		b.WriteString(styleSubtitle.Render("  Starting daemon..."))
 		b.WriteString("\n")
-		return b.String()
+		v := tea.NewView(b.String())
+		v.AltScreen = true
+		return v
 	}
 
 	if m.done {
 		b.WriteString(styleActive.Render("  " + m.status))
 		b.WriteString("\n\n")
 		b.WriteString(styleMuted.Render("  Launching TUI..."))
-		return b.String()
+		v := tea.NewView(b.String())
+		v.AltScreen = true
+		return v
 	}
 
 	if m.err != nil {
@@ -150,7 +154,9 @@ func (m SetupModel) View() string {
 	b.WriteString("\n")
 	b.WriteString(styleHelp.Render("[Enter] Select  [q] Quit"))
 
-	return b.String()
+	v := tea.NewView(b.String())
+	v.AltScreen = true
+	return v
 }
 
 func (m SetupModel) executeAction(action setupAction) tea.Cmd {

@@ -80,7 +80,7 @@ func runTUI(cfg config.Config) {
 
 	if !client.Ping() {
 		setup := tui.NewSetupModel(client)
-		sp := tea.NewProgram(setup, tea.WithAltScreen())
+		sp := tea.NewProgram(setup)
 		result, err := sp.Run()
 		if err != nil {
 			log.Fatalf("setup: %v", err)
@@ -93,7 +93,7 @@ func runTUI(cfg config.Config) {
 	}
 
 	m := tui.NewModel(client)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m)
 	if _, err := p.Run(); err != nil {
 		log.Fatalf("tui: %v", err)
 	}

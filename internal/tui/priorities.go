@@ -45,7 +45,7 @@ func NewPrioritiesModel() PrioritiesModel {
 
 func (m PrioritiesModel) Update(msg tea.Msg) (PrioritiesModel, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch m.section {
 		case sectionPriorities:
 			return m.handlePriorityInput(msg)
@@ -76,7 +76,7 @@ func (m PrioritiesModel) Update(msg tea.Msg) (PrioritiesModel, tea.Cmd) {
 	return m, nil
 }
 
-func (m PrioritiesModel) handlePriorityInput(msg tea.KeyMsg) (PrioritiesModel, tea.Cmd) {
+func (m PrioritiesModel) handlePriorityInput(msg tea.KeyPressMsg) (PrioritiesModel, tea.Cmd) {
 	available := m.availableDevices()
 
 	switch msg.String() {
@@ -153,7 +153,7 @@ func (m PrioritiesModel) handlePriorityInput(msg tea.KeyMsg) (PrioritiesModel, t
 	return m, nil
 }
 
-func (m PrioritiesModel) handleSwitchingInput(msg tea.KeyMsg) (PrioritiesModel, tea.Cmd) {
+func (m PrioritiesModel) handleSwitchingInput(msg tea.KeyPressMsg) (PrioritiesModel, tea.Cmd) {
 	opts := m.switchingOptions()
 	total := len(opts)
 

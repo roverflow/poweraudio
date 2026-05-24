@@ -48,7 +48,7 @@ func (m Model) Init() tea.Cmd {
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
@@ -106,7 +106,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m Model) View() string {
+func (m Model) View() tea.View {
 	var b strings.Builder
 
 	b.WriteString(m.renderTabs())
@@ -124,7 +124,9 @@ func (m Model) View() string {
 	b.WriteString("\n\n")
 	b.WriteString(m.renderStatusBar())
 
-	return b.String()
+	v := tea.NewView(b.String())
+	v.AltScreen = true
+	return v
 }
 
 func (m Model) renderTabs() string {

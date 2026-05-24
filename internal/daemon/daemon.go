@@ -256,7 +256,7 @@ func (d *Daemon) GetEvents(limit int) []ipc.EventLog {
 	if limit <= 0 || limit > len(d.events) {
 		limit = len(d.events)
 	}
-	out := make([]EventLog, limit)
+	out := make([]ipc.EventLog, limit)
 	copy(out, d.events[len(d.events)-limit:])
 	return out
 }
