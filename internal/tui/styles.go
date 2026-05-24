@@ -1,6 +1,6 @@
 package tui
 
-import "github.com/charmbracelet/lipgloss/v2"
+import "charm.land/lipgloss/v2"
 
 var (
 	colorPrimary   = lipgloss.Color("#7C3AED")
