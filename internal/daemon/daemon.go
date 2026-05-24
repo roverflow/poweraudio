@@ -176,11 +176,6 @@ func (d *Daemon) handleBluetoothEvent(ctx context.Context, ev bluetooth.Event) {
 		time.Sleep(300 * time.Millisecond)
 		d.refreshDevices(ctx)
 
-		currentDefault, _ := d.backend.GetDefaultSink(ctx)
-		if currentDefault != nil && currentDefault.Available {
-			return
-		}
-
 		d.mu.RLock()
 		devices := d.devices
 		priorities := d.cfg.Priority
