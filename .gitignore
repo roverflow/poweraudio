@@ -1,0 +1,6 @@
+poweraudio
+*.exe
+*.test
+*.out
+*.prof
+dist/
