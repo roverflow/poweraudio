@@ -35,10 +35,8 @@ func (m *Monitor) Close() {
 
 func (m *Monitor) Subscribe(ctx context.Context) (<-chan Event, error) {
 	if err := m.conn.AddMatchSignal(
-		dbus.WithMatchObjectPath("/"),
 		dbus.WithMatchInterface("org.freedesktop.DBus.Properties"),
 		dbus.WithMatchMember("PropertiesChanged"),
-		dbus.WithMatchSender("org.bluez"),
 		dbus.WithMatchPathNamespace("/org/bluez"),
 	); err != nil {
 		return nil, fmt.Errorf("adding D-Bus match: %w", err)
