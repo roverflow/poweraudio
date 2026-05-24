@@ -230,62 +230,105 @@ func (d *Daemon) tryPendingSwitch(ctx context.Context) {
 	d.mu.RUnlock()
 
 	if p == nil || time.Now().After(p.expiry) {
-		if p != nil {
-			d.mu.Lock()
-			d.pending = nil
-			d.mu.Unlock()
+		return
+	}
+
+	// Run in a goroutine so we don't block the event loop.
+	// Retry several times since pw-dump may lag behind pactl subscribe.
+	go func() {
+		delays := []time.Duration{
+			200 * time.Millisecond,
+			500 * time.Millisecond,
+			1 * time.Second,
+			2 * time.Second,
+			3 * time.Second,
 		}
-		return
-	}
 
-	if d.cfg.Switching.OnConnect == "never" {
-		d.mu.Lock()
-		d.pending = nil
-		d.mu.Unlock()
-		return
-	}
+		for attempt, delay := range delays {
+			d.mu.RLock()
+			current := d.pending
+			d.mu.RUnlock()
 
-	d.mu.RLock()
-	devices := d.devices
-	priorities := d.cfg.Priority
-	d.mu.RUnlock()
+			if current == nil || current != p {
+				return // cleared or replaced
+			}
+			if time.Now().After(p.expiry) {
+				d.logEvent("pending BT switch expired for %s", p.name)
+				d.mu.Lock()
+				if d.pending == p {
+					d.pending = nil
+				}
+				d.mu.Unlock()
+				return
+			}
 
-	var btDevice *audio.Device
-	for i := range devices {
-		if devices[i].Type == audio.DeviceTypeBluetooth &&
-			(devices[i].MACAddress == p.mac || containsIgnoreCase(devices[i].Name, p.name)) {
-			btDevice = &devices[i]
-			break
-		}
-	}
+			if d.cfg.Switching.OnConnect == "never" {
+				d.mu.Lock()
+				d.pending = nil
+				d.mu.Unlock()
+				return
+			}
 
-	if btDevice == nil {
-		return
-	}
+			d.refreshDevices(ctx)
 
-	d.mu.Lock()
-	d.pending = nil
-	d.mu.Unlock()
+			d.mu.RLock()
+			devices := d.devices
+			priorities := d.cfg.Priority
+			d.mu.RUnlock()
 
-	if d.cfg.Switching.OnConnect == "priority" {
-		currentDefault, _ := d.backend.GetDefaultSink(ctx)
-		if currentDefault != nil {
-			currentPrio := DevicePriority(*currentDefault, priorities)
-			newPrio := DevicePriority(*btDevice, priorities)
-			if newPrio >= currentPrio {
-				d.logEvent("skipping switch: %s has lower priority", btDevice.Name)
+			var btDevice *audio.Device
+			for i := range devices {
+				if devices[i].Type == audio.DeviceTypeBluetooth &&
+					(devices[i].MACAddress == p.mac || containsIgnoreCase(devices[i].Name, p.name)) {
+					btDevice = &devices[i]
+					break
+				}
+			}
+
+			if btDevice != nil {
+				d.mu.Lock()
+				d.pending = nil
+				d.mu.Unlock()
+
+				if d.cfg.Switching.OnConnect == "priority" {
+					currentDefault, _ := d.backend.GetDefaultSink(ctx)
+					if currentDefault != nil {
+						currentPrio := DevicePriority(*currentDefault, priorities)
+						newPrio := DevicePriority(*btDevice, priorities)
+						if newPrio >= currentPrio {
+							d.logEvent("skipping switch: %s has lower priority", btDevice.Name)
+							return
+						}
+					}
+				}
+
+				d.savePrevious(ctx)
+				if err := d.backend.SetDefaultSink(ctx, btDevice.ID); err != nil {
+					d.logEvent("switch failed: %v", err)
+					return
+				}
+				d.logEvent("switched to %s", btDevice.Name)
+				d.refreshDevices(ctx)
+				return
+			}
+
+			d.logEvent("pending BT switch: %s not found yet (attempt %d/%d)",
+				p.name, attempt+1, len(delays))
+
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
 				return
 			}
 		}
-	}
 
-	d.savePrevious(ctx)
-	if err := d.backend.SetDefaultSink(ctx, btDevice.ID); err != nil {
-		d.logEvent("switch failed: %v", err)
-		return
-	}
-	d.logEvent("switched to %s", btDevice.Name)
-	d.refreshDevices(ctx)
+		d.logEvent("giving up waiting for BT sink: %s", p.name)
+		d.mu.Lock()
+		if d.pending == p {
+			d.pending = nil
+		}
+		d.mu.Unlock()
+	}()
 }
 
 func (d *Daemon) refreshDevices(ctx context.Context) {
