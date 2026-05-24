@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"os/exec"
+
 	"github.com/roverflow/poweraudio/internal/audio"
 	"github.com/roverflow/poweraudio/internal/bluetooth"
 	"github.com/roverflow/poweraudio/internal/config"
@@ -164,6 +166,7 @@ func (d *Daemon) handleBluetoothEvent(ctx context.Context, ev bluetooth.Event) {
 			return
 		}
 		d.logEvent("switched to %s", btDevice.Name)
+		d.notify("Audio Switched", fmt.Sprintf("Now playing through %s", btDevice.Name))
 		d.refreshDevices(ctx)
 
 	} else {
@@ -206,6 +209,7 @@ func (d *Daemon) handleBluetoothEvent(ctx context.Context, ev bluetooth.Event) {
 			return
 		}
 		d.logEvent("fallback to %s", target.Name)
+		d.notify("Audio Fallback", fmt.Sprintf("Switched to %s", target.Name))
 		d.refreshDevices(ctx)
 	}
 }
@@ -308,6 +312,7 @@ func (d *Daemon) tryPendingSwitch(ctx context.Context) {
 					return
 				}
 				d.logEvent("switched to %s", btDevice.Name)
+				d.notify("Audio Switched", fmt.Sprintf("Now playing through %s", btDevice.Name))
 				d.refreshDevices(ctx)
 				return
 			}
@@ -403,6 +408,10 @@ func (d *Daemon) UpdatePriorities(priorities []config.PriorityEntry) {
 	d.mu.Lock()
 	d.cfg.Priority = priorities
 	d.mu.Unlock()
+}
+
+func (d *Daemon) notify(title, body string) {
+	exec.Command("notify-send", "-a", "poweraudio", "-i", "audio-headphones", title, body).Start()
 }
 
 func containsIgnoreCase(s, substr string) bool {
