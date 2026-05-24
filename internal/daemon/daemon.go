@@ -13,6 +13,12 @@ import (
 	"github.com/roverflow/poweraudio/internal/ipc"
 )
 
+type pendingBT struct {
+	mac        string
+	name       string
+	expiry     time.Time
+}
+
 type Daemon struct {
 	cfg       config.Config
 	backend   audio.Backend
@@ -23,6 +29,7 @@ type Daemon struct {
 	previousID string
 	events     []ipc.EventLog
 	startTime  time.Time
+	pending    *pendingBT
 
 	ipcRequests chan IPCRequest
 }
@@ -128,7 +135,14 @@ func (d *Daemon) handleBluetoothEvent(ctx context.Context, ev bluetooth.Event) {
 		}
 
 		if btDevice == nil {
-			d.logEvent("bluetooth device not found as audio sink yet")
+			d.logEvent("bluetooth device not found as audio sink yet, waiting for sink...")
+			d.mu.Lock()
+			d.pending = &pendingBT{
+				mac:    ev.MACAddress,
+				name:   ev.DeviceName,
+				expiry: time.Now().Add(15 * time.Second),
+			}
+			d.mu.Unlock()
 			return
 		}
 
@@ -154,6 +168,10 @@ func (d *Daemon) handleBluetoothEvent(ctx context.Context, ev bluetooth.Event) {
 
 	} else {
 		d.logEvent("bluetooth disconnected: %s (%s)", ev.DeviceName, ev.MACAddress)
+
+		d.mu.Lock()
+		d.pending = nil
+		d.mu.Unlock()
 
 		time.Sleep(300 * time.Millisecond)
 		d.refreshDevices(ctx)
@@ -202,12 +220,77 @@ func (d *Daemon) handleAudioEvent(ctx context.Context, ev audio.Event) {
 	case audio.EventSinkAdded:
 		d.logEvent("sink added: %s", ev.DeviceID)
 		d.refreshDevices(ctx)
+		d.tryPendingSwitch(ctx)
 	case audio.EventSinkRemoved:
 		d.logEvent("sink removed: %s", ev.DeviceID)
 		d.refreshDevices(ctx)
 	case audio.EventDefaultChanged:
 		d.refreshDevices(ctx)
 	}
+}
+
+func (d *Daemon) tryPendingSwitch(ctx context.Context) {
+	d.mu.RLock()
+	p := d.pending
+	d.mu.RUnlock()
+
+	if p == nil || time.Now().After(p.expiry) {
+		if p != nil {
+			d.mu.Lock()
+			d.pending = nil
+			d.mu.Unlock()
+		}
+		return
+	}
+
+	if d.cfg.Switching.OnConnect == "never" {
+		d.mu.Lock()
+		d.pending = nil
+		d.mu.Unlock()
+		return
+	}
+
+	d.mu.RLock()
+	devices := d.devices
+	priorities := d.cfg.Priority
+	d.mu.RUnlock()
+
+	var btDevice *audio.Device
+	for i := range devices {
+		if devices[i].Type == audio.DeviceTypeBluetooth &&
+			(devices[i].MACAddress == p.mac || containsIgnoreCase(devices[i].Name, p.name)) {
+			btDevice = &devices[i]
+			break
+		}
+	}
+
+	if btDevice == nil {
+		return
+	}
+
+	d.mu.Lock()
+	d.pending = nil
+	d.mu.Unlock()
+
+	if d.cfg.Switching.OnConnect == "priority" {
+		currentDefault, _ := d.backend.GetDefaultSink(ctx)
+		if currentDefault != nil {
+			currentPrio := DevicePriority(*currentDefault, priorities)
+			newPrio := DevicePriority(*btDevice, priorities)
+			if newPrio >= currentPrio {
+				d.logEvent("skipping switch: %s has lower priority", btDevice.Name)
+				return
+			}
+		}
+	}
+
+	d.savePrevious(ctx)
+	if err := d.backend.SetDefaultSink(ctx, btDevice.ID); err != nil {
+		d.logEvent("switch failed: %v", err)
+		return
+	}
+	d.logEvent("switched to %s", btDevice.Name)
+	d.refreshDevices(ctx)
 }
 
 func (d *Daemon) refreshDevices(ctx context.Context) {
