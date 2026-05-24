@@ -51,8 +51,13 @@ func (p *PipeWire) ListSinks(ctx context.Context) ([]Device, error) {
 			IsDefault: strconv.Itoa(e.ID) == defaultID,
 		}
 
-		if api, ok := e.Info.Props["device.api"].(string); ok && api == "bluez5" {
-			dev.MACAddress = propStr(e.Info.Props, "api.bluez5.address")
+		// Extract BT MAC from multiple possible sources
+		if mac := propStr(e.Info.Props, "api.bluez5.address"); mac != "" {
+			dev.MACAddress = mac
+			dev.Type = DeviceTypeBluetooth
+		} else if nodeName := propStr(e.Info.Props, "node.name"); strings.HasPrefix(nodeName, "bluez_") {
+			dev.Type = DeviceTypeBluetooth
+			dev.MACAddress = macFromNodeName(nodeName)
 		}
 
 		if vol, ok := e.Info.Params["Props"].([]any); ok {
@@ -185,9 +190,27 @@ func propStr(props map[string]any, keys ...string) string {
 	return ""
 }
 
+func macFromNodeName(nodeName string) string {
+	// Parse "bluez_output.3C_B0_ED_3A_2C_42.1" → "3C:B0:ED:3A:2C:42"
+	parts := strings.SplitN(nodeName, ".", 3)
+	if len(parts) < 2 {
+		return ""
+	}
+	mac := parts[1]
+	if len(mac) != 17 { // AA_BB_CC_DD_EE_FF = 17 chars
+		return ""
+	}
+	return strings.ReplaceAll(mac, "_", ":")
+}
+
 func classifyDevice(props map[string]any) DeviceType {
 	api, _ := props["device.api"].(string)
 	if api == "bluez5" {
+		return DeviceTypeBluetooth
+	}
+
+	nodeName, _ := props["node.name"].(string)
+	if strings.HasPrefix(nodeName, "bluez_") {
 		return DeviceTypeBluetooth
 	}
 

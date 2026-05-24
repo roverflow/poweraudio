@@ -312,8 +312,15 @@ func (d *Daemon) tryPendingSwitch(ctx context.Context) {
 				return
 			}
 
-			d.logEvent("pending BT switch: %s not found yet (attempt %d/%d)",
-				p.name, attempt+1, len(delays))
+			// Log what we found for debugging
+		btCount := 0
+		for _, dev := range devices {
+			if dev.Type == audio.DeviceTypeBluetooth {
+				btCount++
+			}
+		}
+		d.logEvent("pending BT switch: %s not found yet (attempt %d/%d, %d sinks, %d bluetooth)",
+				p.name, attempt+1, len(delays), len(devices), btCount)
 
 			select {
 			case <-time.After(delay):
