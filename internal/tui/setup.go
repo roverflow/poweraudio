@@ -179,7 +179,8 @@ func (m SetupModel) startProcess() tea.Cmd {
 		cmd.Stdout = nil
 		cmd.Stderr = nil
 		cmd.Stdin = nil
-		cmd.SysProcAttr = &syscallProcAttr()
+		attr := syscallProcAttr()
+		cmd.SysProcAttr = &attr
 
 		if err := cmd.Start(); err != nil {
 			return setupResultMsg{err: fmt.Errorf("starting daemon: %w", err)}
