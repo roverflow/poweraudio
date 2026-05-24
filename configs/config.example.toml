@@ -1,0 +1,42 @@
+# poweraudio configuration
+
+[general]
+# Audio backend: "auto", "pipewire", or "pulseaudio"
+backend = "auto"
+
+# Log level: "debug", "info", "warn", "error"
+log_level = "info"
+
+[switching]
+# What to do when a Bluetooth device connects:
+#   "always"   - auto-switch to it immediately
+#   "priority" - only switch if higher priority than current device
+#   "never"    - never auto-switch on connect
+on_connect = "always"
+
+# What to do when the current device disconnects:
+#   "priority" - switch to highest-priority available device
+#   "previous" - switch back to whatever was active before
+on_disconnect = "priority"
+
+# Delay (ms) before switching after a Bluetooth event.
+# Gives PipeWire time to register the new audio sink.
+switch_delay_ms = 500
+
+[daemon]
+# Unix socket path for daemon <-> TUI communication.
+# Defaults to $XDG_RUNTIME_DIR/poweraudio.sock
+# socket_path = "/run/user/1000/poweraudio.sock"
+
+[tui]
+show_volume = true
+
+# Device priority list (highest first).
+# Devices are matched by substring of name, description, or MAC address.
+
+# [[priority]]
+# match = "JBL Tune 520BT"
+# type = "bluetooth"
+#
+# [[priority]]
+# match = "Built-in Audio Analog Stereo"

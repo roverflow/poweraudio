@@ -1,0 +1,14 @@
+[Unit]
+Description=poweraudio - Audio output controller daemon
+After=pipewire.service wireplumber.service
+Wants=pipewire.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/poweraudio --daemon
+Restart=on-failure
+RestartSec=5
+Environment=XDG_RUNTIME_DIR=%t
+
+[Install]
+WantedBy=default.target
