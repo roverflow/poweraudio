@@ -85,6 +85,23 @@ func (p *PulseAudio) SetDefaultSink(ctx context.Context, deviceID string) error 
 	return nil
 }
 
+func (p *PulseAudio) SetVolume(ctx context.Context, deviceID string, percent int) error {
+	vol := fmt.Sprintf("%d%%", percent)
+	out, err := exec.CommandContext(ctx, "pactl", "set-sink-volume", deviceID, vol).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("pactl set-sink-volume %s %s: %s: %w", deviceID, vol, string(out), err)
+	}
+	return nil
+}
+
+func (p *PulseAudio) ToggleMute(ctx context.Context, deviceID string) error {
+	out, err := exec.CommandContext(ctx, "pactl", "set-sink-mute", deviceID, "toggle").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("pactl set-sink-mute %s: %s: %w", deviceID, string(out), err)
+	}
+	return nil
+}
+
 func (p *PulseAudio) SubscribeEvents(ctx context.Context) (<-chan Event, error) {
 	cmd := exec.CommandContext(ctx, "pactl", "subscribe")
 	stdout, err := cmd.StdoutPipe()

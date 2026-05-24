@@ -131,6 +131,30 @@ func (c *Client) GetConfig() (*config.Config, error) {
 	return &cfg, nil
 }
 
+func (c *Client) SetVolume(deviceID string, percent int) error {
+	params, _ := json.Marshal(SetVolumeParams{DeviceID: deviceID, Percent: percent})
+	resp, err := c.call(Request{Method: MethodSetVolume, Params: params})
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("daemon error: %s", resp.Error)
+	}
+	return nil
+}
+
+func (c *Client) ToggleMute(deviceID string) error {
+	params, _ := json.Marshal(ToggleMuteParams{DeviceID: deviceID})
+	resp, err := c.call(Request{Method: MethodToggleMute, Params: params})
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("daemon error: %s", resp.Error)
+	}
+	return nil
+}
+
 func (c *Client) UpdatePriorities(priorities []config.PriorityEntry) error {
 	params, _ := json.Marshal(priorities)
 	resp, err := c.call(Request{Method: MethodUpdatePriorities, Params: params})

@@ -39,6 +39,28 @@ func (d *Daemon) handleIPC(ctx context.Context, req IPCRequest) {
 			resp = ipc.SuccessResponse(nil)
 		}
 
+	case ipc.MethodSetVolume:
+		var params ipc.SetVolumeParams
+		if err := json.Unmarshal(req.Request.Params, &params); err != nil {
+			resp = ipc.ErrorResponse("invalid params: " + err.Error())
+		} else if err := d.backend.SetVolume(ctx, params.DeviceID, params.Percent); err != nil {
+			resp = ipc.ErrorResponse(err.Error())
+		} else {
+			d.refreshDevices(ctx)
+			resp = ipc.SuccessResponse(nil)
+		}
+
+	case ipc.MethodToggleMute:
+		var params ipc.ToggleMuteParams
+		if err := json.Unmarshal(req.Request.Params, &params); err != nil {
+			resp = ipc.ErrorResponse("invalid params: " + err.Error())
+		} else if err := d.backend.ToggleMute(ctx, params.DeviceID); err != nil {
+			resp = ipc.ErrorResponse(err.Error())
+		} else {
+			d.refreshDevices(ctx)
+			resp = ipc.SuccessResponse(nil)
+		}
+
 	case ipc.MethodGetStatus:
 		resp = ipc.SuccessResponse(ipc.StatusData{
 			Backend:   d.backend.Name(),

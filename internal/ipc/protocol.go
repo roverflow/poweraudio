@@ -15,6 +15,8 @@ const (
 	MethodGetEvents        = "get_events"
 	MethodGetConfig        = "get_config"
 	MethodUpdatePriorities = "update_priorities"
+	MethodSetVolume         = "set_volume"
+	MethodToggleMute       = "toggle_mute"
 	MethodUpdateSwitching  = "update_switching"
 	MethodReloadConfig     = "reload_config"
 )
@@ -50,6 +52,15 @@ type EventLog struct {
 }
 
 type PriorityEntry = config.PriorityEntry
+
+type SetVolumeParams struct {
+	DeviceID string `json:"device_id"`
+	Percent  int    `json:"percent"`
+}
+
+type ToggleMuteParams struct {
+	DeviceID string `json:"device_id"`
+}
 
 type UpdateSwitchingParams struct {
 	OnConnect    string `json:"on_connect"`

@@ -88,6 +88,23 @@ func (p *PipeWire) SetDefaultSink(ctx context.Context, deviceID string) error {
 	return nil
 }
 
+func (p *PipeWire) SetVolume(ctx context.Context, deviceID string, percent int) error {
+	vol := fmt.Sprintf("%d%%", percent)
+	out, err := exec.CommandContext(ctx, "wpctl", "set-volume", deviceID, vol).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("wpctl set-volume %s %s: %s: %w", deviceID, vol, string(out), err)
+	}
+	return nil
+}
+
+func (p *PipeWire) ToggleMute(ctx context.Context, deviceID string) error {
+	out, err := exec.CommandContext(ctx, "wpctl", "set-mute", deviceID, "toggle").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("wpctl set-mute %s: %s: %w", deviceID, string(out), err)
+	}
+	return nil
+}
+
 func (p *PipeWire) SubscribeEvents(ctx context.Context) (<-chan Event, error) {
 	cmd := exec.CommandContext(ctx, "pactl", "subscribe")
 	stdout, err := cmd.StdoutPipe()

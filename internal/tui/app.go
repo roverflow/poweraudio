@@ -80,6 +80,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case setDefaultMsg:
 		return m, m.refreshAll()
 
+	case volumeMsg:
+		return m, m.setVolume(msg.deviceID, msg.percent)
+
+	case muteMsg:
+		return m, m.toggleMute(msg.deviceID)
+
+	case volumeResultMsg, muteResultMsg:
+		return m, m.refreshAll()
+
 	case savePrioritiesMsg:
 		return m, m.savePriorities(msg.priorities)
 
@@ -219,6 +228,20 @@ func (m Model) saveSwitching(switching config.SwitchingConfig) tea.Cmd {
 	return func() tea.Msg {
 		err := m.client.UpdateSwitching(switching.OnConnect, switching.OnDisconnect)
 		return saveSwitchingResultMsg{err: err}
+	}
+}
+
+func (m Model) setVolume(deviceID string, percent int) tea.Cmd {
+	return func() tea.Msg {
+		err := m.client.SetVolume(deviceID, percent)
+		return volumeResultMsg{err: err}
+	}
+}
+
+func (m Model) toggleMute(deviceID string) tea.Cmd {
+	return func() tea.Msg {
+		err := m.client.ToggleMute(deviceID)
+		return muteResultMsg{err: err}
 	}
 }
 

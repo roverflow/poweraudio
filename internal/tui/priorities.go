@@ -53,12 +53,14 @@ func (m PrioritiesModel) Update(msg tea.Msg) (PrioritiesModel, tea.Cmd) {
 			return m.handleSwitchingInput(msg)
 		}
 	case prioritiesMsg:
-		m.priorities = msg.priorities
 		m.devices = msg.devices
-		m.switching = msg.switching
 		m.err = msg.err
 		if !m.dirty {
+			m.priorities = msg.priorities
 			m.clampCursors()
+		}
+		if !m.switchDirty {
+			m.switching = msg.switching
 		}
 	case savePrioritiesResultMsg:
 		m.err = msg.err

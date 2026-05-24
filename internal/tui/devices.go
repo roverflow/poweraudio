@@ -35,6 +35,28 @@ func (m DevicesModel) Update(msg tea.Msg) (DevicesModel, tea.Cmd) {
 			if m.cursor < len(m.devices) {
 				return m, setDefaultCmd(m.devices[m.cursor].ID)
 			}
+		case "right", "l":
+			if m.cursor < len(m.devices) {
+				dev := m.devices[m.cursor]
+				newVol := int(dev.Volume*100) + 5
+				if newVol > 150 {
+					newVol = 150
+				}
+				return m, volumeCmd(dev.ID, newVol)
+			}
+		case "left", "h":
+			if m.cursor < len(m.devices) {
+				dev := m.devices[m.cursor]
+				newVol := int(dev.Volume*100) - 5
+				if newVol < 0 {
+					newVol = 0
+				}
+				return m, volumeCmd(dev.ID, newVol)
+			}
+		case "m":
+			if m.cursor < len(m.devices) {
+				return m, muteCmd(m.devices[m.cursor].ID)
+			}
 		}
 	case devicesMsg:
 		m.devices = msg.devices
@@ -110,7 +132,7 @@ func (m DevicesModel) View() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(styleHelp.Render("[Enter] Set default  [j/k] Navigate  [r] Refresh"))
+	b.WriteString(styleHelp.Render("[Enter] Set default  [j/k] Navigate  [←/→] Volume  [m] Mute  [r] Refresh"))
 
 	return b.String()
 }
@@ -147,4 +169,33 @@ func setDefaultCmd(deviceID string) tea.Cmd {
 
 type switchDeviceMsg struct {
 	deviceID string
+}
+
+type volumeMsg struct {
+	deviceID string
+	percent  int
+}
+
+type muteMsg struct {
+	deviceID string
+}
+
+type volumeResultMsg struct {
+	err error
+}
+
+type muteResultMsg struct {
+	err error
+}
+
+func volumeCmd(deviceID string, percent int) tea.Cmd {
+	return func() tea.Msg {
+		return volumeMsg{deviceID: deviceID, percent: percent}
+	}
+}
+
+func muteCmd(deviceID string) tea.Cmd {
+	return func() tea.Msg {
+		return muteMsg{deviceID: deviceID}
+	}
 }
