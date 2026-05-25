@@ -22,7 +22,7 @@ func debugLog(location, message string, data map[string]any) {
 	}
 	raw, _ := json.Marshal(entry)
 	raw = append(raw, '\n')
-	f, err := os.OpenFile("/home/roverflow/workspace/projects/poweraudio/.cursor/debug-cb8da3.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile("/tmp/debug-cb8da3.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err == nil {
 		f.Write(raw)
 		f.Close()
