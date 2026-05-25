@@ -86,6 +86,24 @@ func (p *PipeWire) ListSinks(ctx context.Context) ([]Device, error) {
 			dev.Volume, dev.Muted = extractVolume(vol)
 		}
 
+		// #region agent log
+		if dev.Type == DeviceTypeBluetooth {
+			paramKeys := make([]string, 0, len(e.Info.Params))
+			for k := range e.Info.Params {
+				paramKeys = append(paramKeys, k)
+			}
+			pwDebugLog("pipewire.go:ListSinks-BT", "bluetooth device params", map[string]any{
+				"hypothesisId": "H7_H8",
+				"deviceID":     dev.ID,
+				"name":         dev.Name,
+				"paramKeys":    paramKeys,
+				"hasProps":     e.Info.Params["Props"] != nil,
+				"rawVolume":    dev.Volume,
+				"pwDumpID":     e.ID,
+			})
+		}
+		// #endregion
+
 		devices = append(devices, dev)
 	}
 	return devices, nil
@@ -132,6 +150,14 @@ func (p *PipeWire) SetVolume(ctx context.Context, deviceID string, percent int) 
 		"deviceID":     deviceID,
 		"output":       string(out),
 		"err":          fmt.Sprintf("%v", err),
+	})
+	// verify with wpctl get-volume
+	getOut, getErr := exec.CommandContext(ctx, "wpctl", "get-volume", deviceID).CombinedOutput()
+	pwDebugLog("pipewire.go:SetVolume-verify", "wpctl get-volume after set", map[string]any{
+		"hypothesisId": "H6",
+		"deviceID":     deviceID,
+		"getVolOut":    string(getOut),
+		"getVolErr":    fmt.Sprintf("%v", getErr),
 	})
 	// #endregion
 	if err != nil {
