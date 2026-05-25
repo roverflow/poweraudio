@@ -15,10 +15,10 @@ BLUE='\033[0;34m'
 BOLD='\033[1m'
 RESET='\033[0m'
 
-info()  { printf "${BLUE}::${RESET} %s\n" "$*"; }
-ok()    { printf "${GREEN}✓${RESET} %s\n" "$*"; }
-warn()  { printf "${YELLOW}!${RESET} %s\n" "$*"; }
-fail()  { printf "${RED}✗${RESET} %s\n" "$*"; exit 1; }
+info()  { printf "${BLUE}::${RESET} %s\n" "$*" >&2; }
+ok()    { printf "${GREEN}✓${RESET} %s\n" "$*" >&2; }
+warn()  { printf "${YELLOW}!${RESET} %s\n" "$*" >&2; }
+fail()  { printf "${RED}✗${RESET} %s\n" "$*" >&2; exit 1; }
 
 check_deps() {
     local missing=()
@@ -44,7 +44,7 @@ build_in_tmpdir() {
     trap "rm -rf '$tmpdir'" EXIT
 
     info "Cloning repository..."
-    git clone --depth 1 "$REPO" "$tmpdir/poweraudio" 2>&1 | tail -1
+    git clone --depth 1 "$REPO" "$tmpdir/poweraudio" >&2 2>&1
     ok "Cloned"
 
     info "Building..."
@@ -59,7 +59,7 @@ build_in_tmpdir() {
 
 build_in_place() {
     info "Pulling latest changes..."
-    git pull --ff-only 2>&1 | tail -1
+    git pull --ff-only >&2 2>&1
     ok "Updated source"
 
     info "Building..."
