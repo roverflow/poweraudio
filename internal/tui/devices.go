@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -60,7 +61,7 @@ func (m DevicesModel) Update(msg tea.Msg) (DevicesModel, tea.Cmd) {
 		case "right", "l":
 			if m.cursor < len(m.devices) {
 				dev := m.devices[m.cursor]
-				newVol := int(dev.Volume*100) + 5
+				newVol := int(math.Round(dev.Volume*100)) + 5
 				if newVol > 150 {
 					newVol = 150
 				}
@@ -72,24 +73,24 @@ func (m DevicesModel) Update(msg tea.Msg) (DevicesModel, tea.Cmd) {
 				dev := m.devices[m.cursor]
 				// #region agent log
 				debugLog("devices.go:left-press", "volume decrease requested", map[string]any{
-					"hypothesisId": "H1_H5",
-					"deviceID":     dev.ID,
-					"rawVolume":    dev.Volume,
+					"hypothesisId":  "H1_H5",
+					"deviceID":      dev.ID,
+					"rawVolume":     dev.Volume,
 					"vol_times_100": dev.Volume * 100,
-					"int_vol100":   int(dev.Volume * 100),
+					"rounded_vol":   int(math.Round(dev.Volume * 100)),
 				})
 				// #endregion
-				newVol := int(dev.Volume*100) - 5
+				newVol := int(math.Round(dev.Volume*100)) - 5
 				if newVol < 0 {
 					newVol = 0
 				}
 				m.devices[m.cursor].Volume = float64(newVol) / 100.0
 				// #region agent log
 				debugLog("devices.go:left-press-result", "volume decrease computed", map[string]any{
-					"hypothesisId":  "H1",
-					"newVol":        newVol,
-					"newLocalVol":   m.devices[m.cursor].Volume,
-					"deviceID":      dev.ID,
+					"hypothesisId": "H1",
+					"newVol":       newVol,
+					"newLocalVol":  m.devices[m.cursor].Volume,
+					"deviceID":     dev.ID,
 				})
 				// #endregion
 				return m, volumeCmd(dev.ID, newVol)
