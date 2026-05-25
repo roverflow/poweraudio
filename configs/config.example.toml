@@ -23,6 +23,13 @@ on_disconnect = "priority"
 # Gives PipeWire time to register the new audio sink.
 switch_delay_ms = 500
 
+[notifications]
+# Send desktop notifications via notify-send
+enabled = true
+
+# Notify when audio devices are added, removed, or the default changes
+on_device_change = true
+
 [daemon]
 # Unix socket path for daemon <-> TUI communication.
 # Defaults to $XDG_RUNTIME_DIR/poweraudio.sock

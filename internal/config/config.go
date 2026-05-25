@@ -9,11 +9,12 @@ import (
 )
 
 type Config struct {
-	General   GeneralConfig   `toml:"general" json:"general"`
-	Switching SwitchingConfig `toml:"switching" json:"switching"`
-	Daemon    DaemonConfig    `toml:"daemon" json:"daemon"`
-	TUI       TUIConfig       `toml:"tui" json:"tui"`
-	Priority  []PriorityEntry `toml:"priority" json:"priority"`
+	General       GeneralConfig       `toml:"general" json:"general"`
+	Switching     SwitchingConfig     `toml:"switching" json:"switching"`
+	Notifications NotificationsConfig `toml:"notifications" json:"notifications"`
+	Daemon        DaemonConfig        `toml:"daemon" json:"daemon"`
+	TUI           TUIConfig           `toml:"tui" json:"tui"`
+	Priority      []PriorityEntry     `toml:"priority" json:"priority"`
 }
 
 type GeneralConfig struct {
@@ -26,6 +27,11 @@ type SwitchingConfig struct {
 	OnConnect     string `toml:"on_connect" json:"on_connect"`
 	OnDisconnect  string `toml:"on_disconnect" json:"on_disconnect"`
 	SwitchDelayMs int    `toml:"switch_delay_ms" json:"switch_delay_ms"`
+}
+
+type NotificationsConfig struct {
+	Enabled        bool `toml:"enabled" json:"enabled"`
+	OnDeviceChange bool `toml:"on_device_change" json:"on_device_change"`
 }
 
 type DaemonConfig struct {
@@ -52,6 +58,10 @@ func DefaultConfig() Config {
 			OnConnect:     "always",
 			OnDisconnect:  "priority",
 			SwitchDelayMs: 500,
+		},
+		Notifications: NotificationsConfig{
+			Enabled:        true,
+			OnDeviceChange: true,
 		},
 		Daemon: DaemonConfig{
 			SocketPath: socketPath,

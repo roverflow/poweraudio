@@ -8,6 +8,7 @@ const (
 	EventSinkAdded EventType = iota
 	EventSinkRemoved
 	EventDefaultChanged
+	EventSinkChanged
 )
 
 type Event struct {

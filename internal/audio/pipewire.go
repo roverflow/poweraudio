@@ -248,18 +248,17 @@ func extractVolume(propsArr []any) (float64, bool) {
 
 func parsePactlEvent(line string) (Event, bool) {
 	lower := strings.ToLower(line)
-	if !strings.Contains(lower, "sink") {
-		return Event{}, false
-	}
 
 	var ev Event
 	switch {
-	case strings.Contains(lower, "'new'"):
+	case strings.Contains(lower, "'new'") && strings.Contains(lower, "sink"):
 		ev.Type = EventSinkAdded
-	case strings.Contains(lower, "'remove'"):
+	case strings.Contains(lower, "'remove'") && strings.Contains(lower, "sink"):
 		ev.Type = EventSinkRemoved
-	case strings.Contains(lower, "'change'"):
+	case strings.Contains(lower, "'change'") && strings.Contains(lower, "server"):
 		ev.Type = EventDefaultChanged
+	case strings.Contains(lower, "'change'") && strings.Contains(lower, "sink"):
+		ev.Type = EventSinkChanged
 	default:
 		return Event{}, false
 	}

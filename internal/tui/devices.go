@@ -42,6 +42,7 @@ func (m DevicesModel) Update(msg tea.Msg) (DevicesModel, tea.Cmd) {
 				if newVol > 150 {
 					newVol = 150
 				}
+				m.devices[m.cursor].Volume = float64(newVol) / 100.0
 				return m, volumeCmd(dev.ID, newVol)
 			}
 		case "left", "h":
@@ -51,6 +52,7 @@ func (m DevicesModel) Update(msg tea.Msg) (DevicesModel, tea.Cmd) {
 				if newVol < 0 {
 					newVol = 0
 				}
+				m.devices[m.cursor].Volume = float64(newVol) / 100.0
 				return m, volumeCmd(dev.ID, newVol)
 			}
 		case "m":

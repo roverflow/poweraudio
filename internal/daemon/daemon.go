@@ -26,12 +26,14 @@ type Daemon struct {
 	backend   audio.Backend
 	btMonitor *bluetooth.Monitor
 
-	mu         sync.RWMutex
-	devices    []audio.Device
-	previousID string
-	events     []ipc.EventLog
-	startTime  time.Time
-	pending    *pendingBT
+	mu              sync.RWMutex
+	devices         []audio.Device
+	previousID      string
+	lastDefaultID   string
+	events          []ipc.EventLog
+	startTime       time.Time
+	pending         *pendingBT
+	suppressNotify  bool
 
 	ipcRequests chan IPCRequest
 }
@@ -161,13 +163,22 @@ func (d *Daemon) handleBluetoothEvent(ctx context.Context, ev bluetooth.Event) {
 		}
 
 		d.savePrevious(ctx)
+		d.mu.Lock()
+		d.suppressNotify = true
+		d.mu.Unlock()
 		if err := d.backend.SetDefaultSink(ctx, btDevice.ID); err != nil {
+			d.mu.Lock()
+			d.suppressNotify = false
+			d.mu.Unlock()
 			d.logEvent("switch failed: %v", err)
 			return
 		}
 		d.logEvent("switched to %s", btDevice.Name)
 		d.notify("Audio Switched", fmt.Sprintf("Now playing through %s", btDevice.Name))
 		d.refreshDevices(ctx)
+		d.mu.Lock()
+		d.suppressNotify = false
+		d.mu.Unlock()
 
 	} else {
 		d.logEvent("bluetooth disconnected: %s (%s)", ev.DeviceName, ev.MACAddress)
@@ -204,13 +215,22 @@ func (d *Daemon) handleBluetoothEvent(ctx context.Context, ev bluetooth.Event) {
 			return
 		}
 
+		d.mu.Lock()
+		d.suppressNotify = true
+		d.mu.Unlock()
 		if err := d.backend.SetDefaultSink(ctx, target.ID); err != nil {
+			d.mu.Lock()
+			d.suppressNotify = false
+			d.mu.Unlock()
 			d.logEvent("fallback switch failed: %v", err)
 			return
 		}
 		d.logEvent("fallback to %s", target.Name)
 		d.notify("Audio Fallback", fmt.Sprintf("Switched to %s", target.Name))
 		d.refreshDevices(ctx)
+		d.mu.Lock()
+		d.suppressNotify = false
+		d.mu.Unlock()
 	}
 }
 
@@ -219,11 +239,44 @@ func (d *Daemon) handleAudioEvent(ctx context.Context, ev audio.Event) {
 	case audio.EventSinkAdded:
 		d.logEvent("sink added: %s", ev.DeviceID)
 		d.refreshDevices(ctx)
+		d.notifyDeviceChange("Device Connected", ev.DeviceID)
 		d.tryPendingSwitch(ctx)
+
 	case audio.EventSinkRemoved:
 		d.logEvent("sink removed: %s", ev.DeviceID)
+		d.notifyDeviceChange("Device Disconnected", ev.DeviceID)
 		d.refreshDevices(ctx)
+
 	case audio.EventDefaultChanged:
+		d.mu.RLock()
+		oldDefault := d.lastDefaultID
+		d.mu.RUnlock()
+
+		d.refreshDevices(ctx)
+
+		d.mu.RLock()
+		newDefault := d.lastDefaultID
+		suppress := d.suppressNotify
+		d.mu.RUnlock()
+
+		if newDefault != oldDefault && !suppress && d.cfg.Notifications.OnDeviceChange {
+			var name string
+			d.mu.RLock()
+			for _, dev := range d.devices {
+				if dev.ID == newDefault {
+					name = dev.Name
+					break
+				}
+			}
+			d.mu.RUnlock()
+			if name == "" {
+				name = newDefault
+			}
+			d.logEvent("default device changed to %s", name)
+			d.notify("Default Device Changed", fmt.Sprintf("Now playing through %s", name))
+		}
+
+	case audio.EventSinkChanged:
 		d.refreshDevices(ctx)
 	}
 }
@@ -307,13 +360,22 @@ func (d *Daemon) tryPendingSwitch(ctx context.Context) {
 				}
 
 				d.savePrevious(ctx)
+				d.mu.Lock()
+				d.suppressNotify = true
+				d.mu.Unlock()
 				if err := d.backend.SetDefaultSink(ctx, btDevice.ID); err != nil {
+					d.mu.Lock()
+					d.suppressNotify = false
+					d.mu.Unlock()
 					d.logEvent("switch failed: %v", err)
 					return
 				}
 				d.logEvent("switched to %s", btDevice.Name)
 				d.notify("Audio Switched", fmt.Sprintf("Now playing through %s", btDevice.Name))
 				d.refreshDevices(ctx)
+				d.mu.Lock()
+				d.suppressNotify = false
+				d.mu.Unlock()
 				return
 			}
 
@@ -351,6 +413,12 @@ func (d *Daemon) refreshDevices(ctx context.Context) {
 	}
 	d.mu.Lock()
 	d.devices = devices
+	for _, dev := range devices {
+		if dev.IsDefault {
+			d.lastDefaultID = dev.ID
+			break
+		}
+	}
 	d.mu.Unlock()
 }
 
@@ -411,7 +479,29 @@ func (d *Daemon) UpdatePriorities(priorities []config.PriorityEntry) {
 }
 
 func (d *Daemon) notify(title, body string) {
+	if !d.cfg.Notifications.Enabled {
+		return
+	}
 	exec.Command("notify-send", "-a", "poweraudio", "-i", "audio-headphones", title, body).Start()
+}
+
+func (d *Daemon) notifyDeviceChange(title, deviceID string) {
+	if !d.cfg.Notifications.Enabled || !d.cfg.Notifications.OnDeviceChange {
+		return
+	}
+	var name string
+	d.mu.RLock()
+	for _, dev := range d.devices {
+		if dev.ID == deviceID {
+			name = dev.Name
+			break
+		}
+	}
+	d.mu.RUnlock()
+	if name == "" {
+		name = deviceID
+	}
+	d.notify(title, name)
 }
 
 func containsIgnoreCase(s, substr string) bool {
