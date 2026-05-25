@@ -82,26 +82,23 @@ func (p *PipeWire) ListSinks(ctx context.Context) ([]Device, error) {
 			dev.MACAddress = macFromNodeName(nodeName)
 		}
 
-		if vol, ok := e.Info.Params["Props"].([]any); ok {
-			dev.Volume, dev.Muted = extractVolume(vol)
+		vol, muted, err := wpctlGetVolume(ctx, dev.ID)
+		if err == nil {
+			dev.Volume = vol
+			dev.Muted = muted
+		} else if propVol, ok := e.Info.Params["Props"].([]any); ok {
+			dev.Volume, dev.Muted = extractVolume(propVol)
 		}
 
 		// #region agent log
-		if dev.Type == DeviceTypeBluetooth {
-			paramKeys := make([]string, 0, len(e.Info.Params))
-			for k := range e.Info.Params {
-				paramKeys = append(paramKeys, k)
-			}
-			pwDebugLog("pipewire.go:ListSinks-BT", "bluetooth device params", map[string]any{
-				"hypothesisId": "H7_H8",
-				"deviceID":     dev.ID,
-				"name":         dev.Name,
-				"paramKeys":    paramKeys,
-				"hasProps":     e.Info.Params["Props"] != nil,
-				"rawVolume":    dev.Volume,
-				"pwDumpID":     e.ID,
-			})
-		}
+		pwDebugLog("pipewire.go:ListSinks-vol", "device volume resolved", map[string]any{
+			"hypothesisId": "H7_verify",
+			"deviceID":     dev.ID,
+			"name":         dev.Name,
+			"volume":       dev.Volume,
+			"muted":        dev.Muted,
+			"isBT":         dev.Type == DeviceTypeBluetooth,
+		})
 		// #endregion
 
 		devices = append(devices, dev)
@@ -292,6 +289,24 @@ func classifyDevice(props map[string]any) DeviceType {
 	}
 
 	return DeviceTypeSpeaker
+}
+
+func wpctlGetVolume(ctx context.Context, deviceID string) (float64, bool, error) {
+	out, err := exec.CommandContext(ctx, "wpctl", "get-volume", deviceID).CombinedOutput()
+	if err != nil {
+		return 0, false, err
+	}
+	s := strings.TrimSpace(string(out))
+	// Format: "Volume: 0.95" or "Volume: 0.95 [MUTED]"
+	muted := strings.Contains(s, "[MUTED]")
+	s = strings.TrimPrefix(s, "Volume: ")
+	s = strings.TrimSuffix(s, " [MUTED]")
+	s = strings.TrimSpace(s)
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, false, fmt.Errorf("parsing wpctl volume %q: %w", string(out), err)
+	}
+	return v, muted, nil
 }
 
 func extractVolume(propsArr []any) (float64, bool) {
