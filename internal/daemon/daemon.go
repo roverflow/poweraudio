@@ -239,12 +239,10 @@ func (d *Daemon) handleAudioEvent(ctx context.Context, ev audio.Event) {
 	case audio.EventSinkAdded:
 		d.logEvent("sink added: %s", ev.DeviceID)
 		d.refreshDevices(ctx)
-		d.notifyDeviceChange("Device Connected", ev.DeviceID)
 		d.tryPendingSwitch(ctx)
 
 	case audio.EventSinkRemoved:
 		d.logEvent("sink removed: %s", ev.DeviceID)
-		d.notifyDeviceChange("Device Disconnected", ev.DeviceID)
 		d.refreshDevices(ctx)
 
 	case audio.EventDefaultChanged:
