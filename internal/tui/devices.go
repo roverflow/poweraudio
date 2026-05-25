@@ -1,35 +1,13 @@
 package tui
 
 import (
-	"encoding/json"
 	"fmt"
 	"math"
-	"os"
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/roverflow/poweraudio/internal/audio"
 )
-
-// #region agent log
-func debugLog(location, message string, data map[string]any) {
-	entry := map[string]any{
-		"sessionId":    "cb8da3",
-		"location":     location,
-		"message":      message,
-		"data":         data,
-		"timestamp":    time.Now().UnixMilli(),
-	}
-	raw, _ := json.Marshal(entry)
-	raw = append(raw, '\n')
-	f, err := os.OpenFile("/tmp/debug-cb8da3.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err == nil {
-		f.Write(raw)
-		f.Close()
-	}
-}
-// #endregion
 
 type DevicesModel struct {
 	devices  []audio.Device
@@ -71,28 +49,11 @@ func (m DevicesModel) Update(msg tea.Msg) (DevicesModel, tea.Cmd) {
 		case "left", "h":
 			if m.cursor < len(m.devices) {
 				dev := m.devices[m.cursor]
-				// #region agent log
-				debugLog("devices.go:left-press", "volume decrease requested", map[string]any{
-					"hypothesisId":  "H1_H5",
-					"deviceID":      dev.ID,
-					"rawVolume":     dev.Volume,
-					"vol_times_100": dev.Volume * 100,
-					"rounded_vol":   int(math.Round(dev.Volume * 100)),
-				})
-				// #endregion
 				newVol := int(math.Round(dev.Volume*100)) - 5
 				if newVol < 0 {
 					newVol = 0
 				}
 				m.devices[m.cursor].Volume = float64(newVol) / 100.0
-				// #region agent log
-				debugLog("devices.go:left-press-result", "volume decrease computed", map[string]any{
-					"hypothesisId": "H1",
-					"newVol":       newVol,
-					"newLocalVol":  m.devices[m.cursor].Volume,
-					"deviceID":     dev.ID,
-				})
-				// #endregion
 				return m, volumeCmd(dev.ID, newVol)
 			}
 		case "m":
@@ -101,17 +62,6 @@ func (m DevicesModel) Update(msg tea.Msg) (DevicesModel, tea.Cmd) {
 			}
 		}
 	case devicesMsg:
-		// #region agent log
-		var volSnap []map[string]any
-		for _, d := range msg.devices {
-			volSnap = append(volSnap, map[string]any{"id": d.ID, "vol": d.Volume, "name": d.Name})
-		}
-		debugLog("devices.go:devicesMsg", "devices refreshed from daemon", map[string]any{
-			"hypothesisId": "H2_H5",
-			"deviceCount":  len(msg.devices),
-			"volumes":      volSnap,
-		})
-		// #endregion
 		m.devices = msg.devices
 		m.err = msg.err
 		if m.cursor >= len(m.devices) && len(m.devices) > 0 {

@@ -6,31 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
-	"time"
 )
-
-// #region agent log
-func pwDebugLog(location, message string, data map[string]any) {
-	entry := map[string]any{
-		"sessionId": "cb8da3",
-		"location":  location,
-		"message":   message,
-		"data":      data,
-		"timestamp": time.Now().UnixMilli(),
-	}
-	raw, _ := json.Marshal(entry)
-	raw = append(raw, '\n')
-	f, err := os.OpenFile("/tmp/debug-cb8da3.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err == nil {
-		f.Write(raw)
-		f.Close()
-	}
-}
-// #endregion
 
 type PipeWire struct{}
 
@@ -90,17 +69,6 @@ func (p *PipeWire) ListSinks(ctx context.Context) ([]Device, error) {
 			dev.Volume, dev.Muted = extractVolume(propVol)
 		}
 
-		// #region agent log
-		pwDebugLog("pipewire.go:ListSinks-vol", "device volume resolved", map[string]any{
-			"hypothesisId": "H7_verify",
-			"deviceID":     dev.ID,
-			"name":         dev.Name,
-			"volume":       dev.Volume,
-			"muted":        dev.Muted,
-			"isBT":         dev.Type == DeviceTypeBluetooth,
-		})
-		// #endregion
-
 		devices = append(devices, dev)
 	}
 	return devices, nil
@@ -132,31 +100,7 @@ func (p *PipeWire) SetDefaultSink(ctx context.Context, deviceID string) error {
 
 func (p *PipeWire) SetVolume(ctx context.Context, deviceID string, percent int) error {
 	vol := fmt.Sprintf("%d%%", percent)
-	// #region agent log
-	pwDebugLog("pipewire.go:SetVolume-entry", "wpctl set-volume called", map[string]any{
-		"hypothesisId": "H3",
-		"deviceID":     deviceID,
-		"percent":      percent,
-		"volArg":       vol,
-	})
-	// #endregion
 	out, err := exec.CommandContext(ctx, "wpctl", "set-volume", deviceID, vol).CombinedOutput()
-	// #region agent log
-	pwDebugLog("pipewire.go:SetVolume-exit", "wpctl set-volume result", map[string]any{
-		"hypothesisId": "H3",
-		"deviceID":     deviceID,
-		"output":       string(out),
-		"err":          fmt.Sprintf("%v", err),
-	})
-	// verify with wpctl get-volume
-	getOut, getErr := exec.CommandContext(ctx, "wpctl", "get-volume", deviceID).CombinedOutput()
-	pwDebugLog("pipewire.go:SetVolume-verify", "wpctl get-volume after set", map[string]any{
-		"hypothesisId": "H6",
-		"deviceID":     deviceID,
-		"getVolOut":    string(getOut),
-		"getVolErr":    fmt.Sprintf("%v", getErr),
-	})
-	// #endregion
 	if err != nil {
 		return fmt.Errorf("wpctl set-volume %s %s: %s: %w", deviceID, vol, string(out), err)
 	}
@@ -318,17 +262,7 @@ func extractVolume(propsArr []any) (float64, bool) {
 		if vols, ok := m["channelVolumes"].([]any); ok && len(vols) > 0 {
 			if v, ok := vols[0].(float64); ok {
 				muted, _ := m["mute"].(bool)
-				pct := math.Cbrt(v)
-				// #region agent log
-				pwDebugLog("pipewire.go:extractVolume", "volume extracted from pw-dump", map[string]any{
-					"hypothesisId":    "H4",
-					"rawChanVol":      v,
-					"cbrtVol":         pct,
-					"pct_times_100":   pct * 100,
-					"muted":           muted,
-				})
-				// #endregion
-				return pct, muted
+				return math.Cbrt(v), muted
 			}
 		}
 	}
