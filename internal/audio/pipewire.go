@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"strconv"
@@ -276,17 +277,17 @@ func extractVolume(propsArr []any) (float64, bool) {
 		if vols, ok := m["channelVolumes"].([]any); ok && len(vols) > 0 {
 			if v, ok := vols[0].(float64); ok {
 				muted, _ := m["mute"].(bool)
+				pct := math.Cbrt(v)
 				// #region agent log
 				pwDebugLog("pipewire.go:extractVolume", "volume extracted from pw-dump", map[string]any{
-					"hypothesisId":   "H4",
-					"rawChanVol":     v,
-					"v_times_100":    v * 100,
-					"int_v_times_100": int(v * 100),
-					"muted":          muted,
-					"allChannels":    vols,
+					"hypothesisId":    "H4",
+					"rawChanVol":      v,
+					"cbrtVol":         pct,
+					"pct_times_100":   pct * 100,
+					"muted":           muted,
 				})
 				// #endregion
-				return v, muted
+				return pct, muted
 			}
 		}
 	}
