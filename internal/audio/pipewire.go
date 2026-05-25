@@ -5,10 +5,31 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
+
+// #region agent log
+func pwDebugLog(location, message string, data map[string]any) {
+	entry := map[string]any{
+		"sessionId": "cb8da3",
+		"location":  location,
+		"message":   message,
+		"data":      data,
+		"timestamp": time.Now().UnixMilli(),
+	}
+	raw, _ := json.Marshal(entry)
+	raw = append(raw, '\n')
+	f, err := os.OpenFile("/home/roverflow/workspace/projects/poweraudio/.cursor/debug-cb8da3.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err == nil {
+		f.Write(raw)
+		f.Close()
+	}
+}
+// #endregion
 
 type PipeWire struct{}
 
@@ -95,7 +116,23 @@ func (p *PipeWire) SetDefaultSink(ctx context.Context, deviceID string) error {
 
 func (p *PipeWire) SetVolume(ctx context.Context, deviceID string, percent int) error {
 	vol := fmt.Sprintf("%d%%", percent)
+	// #region agent log
+	pwDebugLog("pipewire.go:SetVolume-entry", "wpctl set-volume called", map[string]any{
+		"hypothesisId": "H3",
+		"deviceID":     deviceID,
+		"percent":      percent,
+		"volArg":       vol,
+	})
+	// #endregion
 	out, err := exec.CommandContext(ctx, "wpctl", "set-volume", deviceID, vol).CombinedOutput()
+	// #region agent log
+	pwDebugLog("pipewire.go:SetVolume-exit", "wpctl set-volume result", map[string]any{
+		"hypothesisId": "H3",
+		"deviceID":     deviceID,
+		"output":       string(out),
+		"err":          fmt.Sprintf("%v", err),
+	})
+	// #endregion
 	if err != nil {
 		return fmt.Errorf("wpctl set-volume %s %s: %s: %w", deviceID, vol, string(out), err)
 	}
@@ -239,6 +276,16 @@ func extractVolume(propsArr []any) (float64, bool) {
 		if vols, ok := m["channelVolumes"].([]any); ok && len(vols) > 0 {
 			if v, ok := vols[0].(float64); ok {
 				muted, _ := m["mute"].(bool)
+				// #region agent log
+				pwDebugLog("pipewire.go:extractVolume", "volume extracted from pw-dump", map[string]any{
+					"hypothesisId":   "H4",
+					"rawChanVol":     v,
+					"v_times_100":    v * 100,
+					"int_v_times_100": int(v * 100),
+					"muted":          muted,
+					"allChannels":    vols,
+				})
+				// #endregion
 				return v, muted
 			}
 		}
