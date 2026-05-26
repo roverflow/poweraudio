@@ -3,7 +3,7 @@ VERSION = $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev"
 LDFLAGS = -ldflags "-X main.version=$(VERSION)"
 PREFIX ?= $(HOME)/.local
 
-.PHONY: build install uninstall clean
+.PHONY: build install uninstall purge clean
 
 build:
 	go build $(LDFLAGS) -o $(BINARY) ./cmd/poweraudio
@@ -17,10 +17,15 @@ install: build
 	@echo "  systemctl --user enable --now poweraudio"
 
 uninstall:
-	rm -f $(PREFIX)/bin/$(BINARY)
 	systemctl --user disable --now poweraudio 2>/dev/null || true
+	-pkill -f "poweraudio --daemon" 2>/dev/null || true
+	rm -f $(PREFIX)/bin/$(BINARY)
 	rm -f $(HOME)/.config/systemd/user/poweraudio.service
-	systemctl --user daemon-reload
+	systemctl --user daemon-reload 2>/dev/null || true
+	rm -f $${XDG_RUNTIME_DIR:-/run/user/$$(id -u)}/poweraudio.sock
+
+purge: uninstall
+	rm -rf $${XDG_CONFIG_HOME:-$(HOME)/.config}/poweraudio
 
 clean:
 	rm -f $(BINARY)
