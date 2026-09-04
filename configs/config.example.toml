@@ -1,46 +1,55 @@
 # poweraudio configuration
+#
+# Lives at ~/.config/poweraudio/config.toml and is written on first run.
+# The daemon reads it at startup. Restart it after editing by hand:
+#   systemctl --user restart poweraudio
+#
+# Saving from the terminal UI rewrites this file from the daemon's in-memory
+# config, which drops any comments you added.
 
 [general]
-# Audio backend: "auto", "pipewire", or "pulseaudio"
+# "auto" tries wpctl first, then pactl.
 backend = "auto"
 
-# Log level: "debug", "info", "warn", "error"
+# Accepted but not used yet. The daemon logs at a fixed level to stderr.
 log_level = "info"
 
 [switching]
-# What to do when a Bluetooth device connects:
-#   "always"   - auto-switch to it immediately
-#   "priority" - only switch if higher priority than current device
-#   "never"    - never auto-switch on connect
+# What a Bluetooth device connecting is allowed to do:
+#   "always"   take the output every time
+#   "priority" take it only when it outranks whatever is playing
+#   "never"    log the event, change nothing
 on_connect = "always"
 
-# What to do when the current device disconnects:
-#   "priority" - switch to highest-priority available device
-#   "previous" - switch back to whatever was active before
+# Where the output goes when the device you were listening on disappears:
+#   "priority" the highest ranked entry below that is present
+#   "previous" whatever was default before the daemon switched away
 on_disconnect = "priority"
 
-# Delay (ms) before switching after a Bluetooth event.
-# Gives PipeWire time to register the new audio sink.
+# Head start given to PipeWire to register the new sink before the daemon
+# goes looking for it. Missing sinks are retried for 15 seconds regardless.
 switch_delay_ms = 500
 
 [notifications]
-# Send desktop notifications via notify-send
+# Desktop notifications through notify-send.
 enabled = true
 
-# Notify when audio devices are added, removed, or the default changes
+# Notify when something other than the daemon changes the default device.
 on_device_change = true
 
 [daemon]
-# Unix socket path for daemon <-> TUI communication.
-# Defaults to $XDG_RUNTIME_DIR/poweraudio.sock
+# Defaults to $XDG_RUNTIME_DIR/poweraudio.sock, created with mode 0600.
 # socket_path = "/run/user/1000/poweraudio.sock"
 
 [tui]
+# Accepted but not used yet. Volume bars are always drawn.
 show_volume = true
 
-# Device priority list (highest first).
-# Devices are matched by substring of name, description, or MAC address.
-
+# Fallback ranking, highest first. An entry matches a device when "match" is a
+# case-insensitive substring of its name, description or MAC address. Setting
+# "type" additionally requires the detected type to match: bluetooth, speaker,
+# headphone, hdmi, usb or unknown.
+#
 # [[priority]]
 # match = "JBL Tune 520BT"
 # type = "bluetooth"

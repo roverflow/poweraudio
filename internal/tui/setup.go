@@ -20,6 +20,8 @@ const (
 	actionQuit
 )
 
+var spinFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
 type SetupModel struct {
 	client     *ipc.Client
 	cursor     int
@@ -27,24 +29,20 @@ type SetupModel struct {
 	err        error
 	starting   bool
 	done       bool
+	frame      int
 	binaryPath string
 
 	serviceInstalled bool
-	serviceRunning   bool
 }
 
 func NewSetupModel(client *ipc.Client) SetupModel {
 	bin, _ := os.Executable()
 	bin, _ = filepath.EvalSymlinks(bin)
 
-	installed := serviceFileExists()
-	running := client.Ping()
-
 	return SetupModel{
 		client:           client,
 		binaryPath:       bin,
-		serviceInstalled: installed,
-		serviceRunning:   running,
+		serviceInstalled: serviceFileExists(),
 	}
 }
 
@@ -55,10 +53,19 @@ func (m SetupModel) Init() tea.Cmd {
 func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
+		key := msg.String()
+		if key == "ctrl+c" {
+			return m, tea.Quit
+		}
+		// While a daemon is coming up, swallow everything. This guard used
+		// to sit behind a flag that was set on a discarded copy of the
+		// model, so a second Enter would launch a second daemon that then
+		// stole the first one's socket.
 		if m.starting {
 			return m, nil
 		}
-		switch msg.String() {
+
+		switch key {
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
@@ -67,22 +74,42 @@ func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.cursor < 2 {
 				m.cursor++
 			}
-		case "enter":
-			return m, m.executeAction(setupAction(m.cursor))
-		case "q", "ctrl+c":
+		case "q":
 			return m, tea.Quit
+		case "enter":
+			switch setupAction(m.cursor) {
+			case actionQuit:
+				return m, tea.Quit
+			case actionStartProcess:
+				m.starting = true
+				m.err = nil
+				m.status = "Starting the daemon"
+				return m, tea.Batch(m.startProcess(), spinCmd())
+			case actionInstallService:
+				m.starting = true
+				m.err = nil
+				m.status = "Installing the user service"
+				return m, tea.Batch(m.installService(), spinCmd())
+			}
 		}
+
+	case spinTickMsg:
+		if !m.starting {
+			return m, nil
+		}
+		m.frame++
+		return m, spinCmd()
 
 	case setupResultMsg:
 		m.starting = false
 		if msg.err != nil {
 			m.err = msg.err
-			m.status = "Failed: " + msg.err.Error()
-		} else {
-			m.status = msg.status
-			m.done = true
-			return m, tea.Quit
+			m.status = ""
+			return m, nil
 		}
+		m.status = msg.status
+		m.done = true
+		return m, tea.Quit
 	}
 	return m, nil
 }
@@ -90,87 +117,66 @@ func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m SetupModel) View() tea.View {
 	var b strings.Builder
 
-	b.WriteString(styleTitle.Render("poweraudio"))
+	b.WriteString("  " + styleTitle.Render("poweraudio"))
 	b.WriteString("\n")
-	b.WriteString(styleMuted.Render("Audio output controller daemon is not running"))
+	b.WriteString("  " + styleMuted.Render("The audio daemon is not running yet"))
 	b.WriteString("\n\n")
 
-	if m.serviceInstalled {
-		b.WriteString(styleMuted.Render("  Service file: installed"))
-		b.WriteString("\n\n")
-	}
-
 	if m.starting {
-		b.WriteString(styleSubtitle.Render("  Starting daemon..."))
+		spin := styleAccent.Render(spinFrames[m.frame%len(spinFrames)])
+		b.WriteString("  " + spin + " " + styleSubtitle.Render(m.status+"…"))
 		b.WriteString("\n")
-		v := tea.NewView(b.String())
-		v.AltScreen = true
-		return v
+		return setupView(b.String())
 	}
 
 	if m.done {
-		b.WriteString(styleActive.Render("  " + m.status))
+		b.WriteString("  " + styleActive.Render("✓ "+m.status))
 		b.WriteString("\n\n")
-		b.WriteString(styleMuted.Render("  Launching TUI..."))
-		v := tea.NewView(b.String())
-		v.AltScreen = true
-		return v
+		b.WriteString("  " + styleMuted.Render("Opening the interface"))
+		return setupView(b.String())
+	}
+
+	if m.serviceInstalled {
+		b.WriteString("  " + styleMuted.Render("A service file is already installed"))
+		b.WriteString("\n\n")
 	}
 
 	if m.err != nil {
-		b.WriteString("\n")
-		b.WriteString(styleMuted.Render(fmt.Sprintf("  Error: %v", m.err)))
+		b.WriteString("  " + styleError.Render(truncate(m.err.Error(), 76)))
 		b.WriteString("\n\n")
 	}
 
-	options := []struct {
-		label string
-		desc  string
-	}{
-		{"Start daemon (background process)", "Run once — stops when you log out"},
-		{"Install as systemd service (recommended)", "Auto-starts on login, restarts on crash"},
+	options := []struct{ label, desc string }{
+		{"Start the daemon now", "Runs until you log out"},
+		{"Install the user service", "Starts on login and restarts after a crash"},
 		{"Quit", ""},
 	}
 
 	for i, opt := range options {
-		cursor := "  "
+		prefix := "  "
+		label := styleNormal.Render(opt.label)
 		if i == m.cursor {
-			cursor = "> "
+			prefix = styleAccent.Render("▎") + " "
+			label = styleSelected.Render(opt.label)
 		}
-
-		line := cursor + opt.label
-		if i == m.cursor {
-			b.WriteString(styleSelected.Render(line))
-		} else {
-			b.WriteString(styleNormal.Render(line))
-		}
+		b.WriteString(prefix + label)
 		b.WriteString("\n")
 		if opt.desc != "" {
-			b.WriteString(styleMuted.Render("    " + opt.desc))
+			b.WriteString("    " + styleMuted.Render(opt.desc))
 			b.WriteString("\n")
 		}
 	}
 
 	b.WriteString("\n")
-	b.WriteString(styleHelp.Render("[Enter] Select  [q] Quit"))
+	b.WriteString(helpLine(80, "enter select", "j/k move", "q quit"))
 
-	v := tea.NewView(b.String())
-	v.AltScreen = true
-	return v
+	return setupView(b.String())
 }
 
-func (m SetupModel) executeAction(action setupAction) tea.Cmd {
-	switch action {
-	case actionStartProcess:
-		m.starting = true
-		return m.startProcess()
-	case actionInstallService:
-		m.starting = true
-		return m.installService()
-	case actionQuit:
-		return tea.Quit
-	}
-	return nil
+func setupView(s string) tea.View {
+	v := tea.NewView(s)
+	v.AltScreen = true
+	return v
 }
 
 func (m SetupModel) startProcess() tea.Cmd {
@@ -194,7 +200,7 @@ func (m SetupModel) startProcess() tea.Cmd {
 				return setupResultMsg{status: "Daemon started"}
 			}
 		}
-		return setupResultMsg{err: fmt.Errorf("daemon started but not responding")}
+		return setupResultMsg{err: fmt.Errorf("daemon started but never answered on the socket")}
 	}
 }
 
@@ -213,11 +219,11 @@ func (m SetupModel) installService() tea.Cmd {
 		}
 
 		if out, err := exec.Command("systemctl", "--user", "daemon-reload").CombinedOutput(); err != nil {
-			return setupResultMsg{err: fmt.Errorf("daemon-reload: %s: %w", string(out), err)}
+			return setupResultMsg{err: fmt.Errorf("daemon-reload: %s: %w", strings.TrimSpace(string(out)), err)}
 		}
 
 		if out, err := exec.Command("systemctl", "--user", "enable", "--now", "poweraudio").CombinedOutput(); err != nil {
-			return setupResultMsg{err: fmt.Errorf("enable service: %s: %w", string(out), err)}
+			return setupResultMsg{err: fmt.Errorf("enable service: %s: %w", strings.TrimSpace(string(out)), err)}
 		}
 
 		for i := 0; i < 30; i++ {
@@ -226,7 +232,7 @@ func (m SetupModel) installService() tea.Cmd {
 				return setupResultMsg{status: "Service installed and started"}
 			}
 		}
-		return setupResultMsg{status: "Service installed — daemon may still be starting"}
+		return setupResultMsg{status: "Service installed, the daemon may still be starting"}
 	}
 }
 
@@ -237,6 +243,14 @@ func (m SetupModel) Done() bool {
 type setupResultMsg struct {
 	status string
 	err    error
+}
+
+type spinTickMsg struct{}
+
+func spinCmd() tea.Cmd {
+	return tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
+		return spinTickMsg{}
+	})
 }
 
 func generateServiceFile(binaryPath string) string {

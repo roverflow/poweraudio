@@ -149,27 +149,28 @@ func (p *PipeWire) defaultSinkID(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	inSinks := false
 	for _, line := range strings.Split(string(out), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.Contains(trimmed, "Sinks:") {
-			inSinks = true
+		// wpctl draws a box-drawing tree down the left margin, so the default
+		// marker is never the first character of the raw line. Strip the tree
+		// before looking for it.
+		clean := strings.TrimSpace(strings.TrimLeft(line, " \t\u2502\u251c\u2514\u2500\u250c\u2510\u2524\u252c\u2534\u253c"))
+
+		if strings.HasSuffix(clean, ":") {
+			inSinks = clean == "Sinks:"
 			continue
 		}
-		if inSinks {
-			if trimmed == "" || (!strings.HasPrefix(trimmed, "*") && !strings.HasPrefix(trimmed, "│")) {
-				if !strings.Contains(trimmed, ".") && !strings.HasPrefix(trimmed, "*") {
-					inSinks = false
-					continue
-				}
-			}
-			if strings.HasPrefix(trimmed, "*") {
-				parts := strings.Fields(trimmed)
-				if len(parts) >= 2 {
-					id := strings.TrimRight(parts[1], ".")
-					return id, nil
-				}
-			}
+		if !inSinks || !strings.HasPrefix(clean, "*") {
+			continue
+		}
+
+		fields := strings.Fields(strings.TrimPrefix(clean, "*"))
+		if len(fields) == 0 {
+			continue
+		}
+		if id := strings.TrimSuffix(fields[0], "."); id != "" {
+			return id, nil
 		}
 	}
 	return "", fmt.Errorf("no default sink found in wpctl status")

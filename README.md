@@ -1,197 +1,177 @@
 # poweraudio
 
-A terminal UI and daemon for managing audio output devices on Linux. Automatically switches to your Bluetooth headphones when they connect and falls back to your preferred device when they disconnect — not a random one.
+A daemon and terminal UI that moves your Linux audio output to your Bluetooth
+headphones when they connect, and puts it back somewhere sensible when they
+disconnect.
 
-![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go&logoColor=white)
-![Platform](https://img.shields.io/badge/Platform-Linux-FCC624?logo=linux&logoColor=black)
-![License](https://img.shields.io/badge/License-MIT-blue)
-
-## The Problem
-
-On most Linux desktops, connecting Bluetooth earphones doesn't automatically switch audio output to them. And when you disconnect, the system picks whatever device it feels like — often HDMI output nobody is using. You end up running `pactl` or digging through settings every time.
-
-## The Solution
-
-**poweraudio** runs a lightweight daemon that watches for Bluetooth connect/disconnect events via D-Bus and switches your audio output based on a priority list you configure through an interactive TUI.
+Linux desktops mostly get the first half of that wrong and the second half
+badly. Connect your earbuds and audio keeps playing through the speakers.
+Disconnect them and the session picks whatever sink it likes, which on a lot of
+machines is the HDMI output feeding a monitor with no speakers. poweraudio
+watches BlueZ over D-Bus and switches the default sink itself, using a ranked
+list of devices you set once.
 
 ```
-poweraudio                          # open the TUI
-poweraudio --daemon                 # run the daemon directly
+poweraudio            # terminal UI
+poweraudio --daemon   # daemon in the foreground
 ```
 
-## Features
+## Requirements
 
-**Daemon**
-- Monitors Bluetooth device connections via D-Bus (BlueZ)
-- Auto-switches audio output on connect based on your priority list
-- Falls back to preferred device on disconnect (not random)
-- Configurable behavior: always switch, only if higher priority, or never
-- Works with both PipeWire and PulseAudio
+- Linux with PipeWire or PulseAudio
+- `wpctl` and `pw-dump` for the PipeWire backend, `pactl` for either
+- BlueZ on the system bus, for the Bluetooth half
+- systemd user session, if you want the daemon to start on login
+- `notify-send` for desktop notifications, optional
+- Go 1.25 or newer to build (`go.mod` pins 1.25.10)
 
-**TUI**
-- View all audio output devices with type, volume, and default status
-- Switch default output device interactively
-- Configure device priority by picking from detected devices
-- Set connect/disconnect behavior with radio-button toggles
-- Install/uninstall the daemon as a systemd service from the UI
-- Auto-setup: if the daemon isn't running, offers to start or install it
+Everything runs as your user. Nothing needs root.
 
-## Installation
+## Install
 
-### From source
-
-Requires Go 1.22+.
+From a checkout:
 
 ```bash
 git clone https://github.com/roverflow/poweraudio.git
 cd poweraudio
-go mod tidy
-make build
+make install
 ```
 
-Install to `~/.local/bin` and set up the systemd service:
+That builds the binary into `~/.local/bin/poweraudio` and drops a unit file at
+`~/.config/systemd/user/poweraudio.service`. Then:
 
 ```bash
-make install
 systemctl --user daemon-reload
 systemctl --user enable --now poweraudio
 ```
 
-Or just run `poweraudio` — it will offer to install the service for you.
+`install.sh` does the same thing plus a version check and a post-install
+health check. `make build` alone just produces `./poweraudio` in the checkout.
 
-### Uninstall
+You can skip all of it and run `poweraudio`. If nothing is listening on the
+socket, the first screen offers to start a daemon for this session or install
+the user service, and gets out of the way once one is up.
+
+## Removing it
 
 ```bash
-make uninstall
+./uninstall.sh          # binary, unit file, socket, stray daemons
+./uninstall.sh --purge  # the above plus ~/.config/poweraudio
 ```
 
-## Quick Start
+`make uninstall` and `make purge` do the same from a checkout.
 
-```bash
-# 1. Build
-make build
+## How switching works
 
-# 2. Run — the setup screen will guide you
-./poweraudio
-```
+Worth reading once, because it explains every delay you will notice.
 
-The setup screen appears automatically and offers to:
-- **Start the daemon as a background process** (stops on logout)
-- **Install as a systemd service** (auto-starts on login, recommended)
+BlueZ publishes a `PropertiesChanged` signal on the system bus whenever a
+device's `Connected` property flips. The daemon subscribes under the
+`/org/bluez` path namespace, pulls the MAC out of the object path
+(`/org/bluez/hci0/dev_3C_B0_ED_3A_2C_42`) and reads the `Alias` property for a
+human name.
 
-After the daemon starts, the TUI opens with your audio devices.
+Bluetooth connecting is not the same event as an audio sink appearing.
+PipeWire creates the `bluez_output.*` sink some time after BlueZ reports the
+link, so the daemon waits `switch_delay_ms` (500 by default), re-lists sinks,
+and looks for one whose MAC matches or whose name contains the BlueZ alias. If
+the sink still is not there, the event is parked and retried at 200ms, 500ms,
+1s, 2s and 3s, and abandoned after 15 seconds. A `new sink` event from `pactl
+subscribe` also kicks a retry, so slow adapters usually land on the first or
+second attempt rather than waiting out the whole ladder.
 
-## Usage
+Once it finds the sink it runs `wpctl set-default <id>`, or
+`pactl set-default-sink <name>` on the PulseAudio backend.
 
-### TUI Navigation
+Disconnect is the same shape in reverse. The daemon waits 300ms for the sink
+to vanish, re-lists, and picks a fallback: either the highest ranked entry in
+your priority list that is currently present, or the sink that was default
+before it switched away, depending on `on_disconnect`.
+
+A priority entry matches a device when `match` is a case-insensitive substring
+of the device's name, description or MAC address. If the entry also sets
+`type`, the device's detected type has to equal it. Order in the file is the
+ranking, first is highest.
+
+The PipeWire backend decides a device's type from its `pw-dump` properties:
+`device.api` of `bluez5` or a `node.name` starting with `bluez_` means
+Bluetooth, `device.bus` of `usb` means USB, a name containing `hdmi` or
+`displayport` means HDMI, a name containing `headphone` means Headphone, and
+anything left is Speaker.
+
+## Keys
+
+Anywhere:
 
 | Key | Action |
 |-----|--------|
-| `d` | Devices screen |
-| `p` | Config screen |
-| `s` | Status screen |
-| `q` | Quit |
-| `r` | Refresh |
+| `d` `p` `s` | devices, config, status (or `1` `2` `3`) |
+| `?` | toggle the key reference, `esc` closes it |
+| `r` | refresh from the daemon |
+| `q` | quit, asks once if the config screen has unsaved edits |
+| `ctrl+c` | quit without asking |
 
-### Devices Screen
-
-```
-  Audio Output Devices
-
-  *  JBL Tune 520BT          Bluetooth   ████████░░  80%
-     Built-in Audio Stereo    Speaker     ██████████ 100%
-     HDMI Output              HDMI        ██████░░░░  60%
-
-  [Enter] Set default  [j/k] Navigate  [r] Refresh
-```
+Devices:
 
 | Key | Action |
 |-----|--------|
-| `j` / `k` | Navigate up/down |
-| `Enter` | Set selected device as default |
+| `j` `k` | move, also `g` `G` `pgup` `pgdn` |
+| `enter` | make the selected device the default output |
+| `h` `l` | volume down and up in 5% steps, 0 to 150 |
+| `m` | mute or unmute |
 
-### Config Screen
-
-Two sections, toggle with `Tab`:
-
-**Device Priority** — pick from real devices, reorder to set fallback preference:
-
-```
-  Device Priority (highest first)
-
-  1. JBL Tune 520BT              bluetooth
-  2. Built-in Audio Stereo       speaker
-
-  Available Devices
-
-     HDMI Output                 HDMI
-     USB Headset                 USB
-
-  [Enter] Add  [x] Remove  [J/K] Reorder  [w] Save
-```
-
-**Switching Behavior** — configure what happens on connect/disconnect:
-
-```
-  On Bluetooth Connect
-
-  > (*) Always switch to it
-    ( ) Only if higher priority than current
-    ( ) Never auto-switch
-
-  On Disconnect (Fallback)
-
-    (*) Switch to highest priority available
-  > ( ) Switch to previous device
-
-  [Enter] Toggle  [w] Save
-```
+Config, priorities section:
 
 | Key | Action |
 |-----|--------|
-| `j` / `k` | Navigate |
-| `J` / `K` | Reorder priority (Shift+j/k) |
-| `Enter` | Add device / toggle option |
-| `x` | Remove from priorities |
-| `Tab` | Switch between Devices and Switching sections |
-| `w` | Save changes |
+| `tab` | swap to the switching rules |
+| `j` `k` | move, falling off the bottom of the ranked list enters the device list below it |
+| `J` `K` | move the selected entry up or down the ranking |
+| `enter` | add the highlighted device to the ranking |
+| `x` | drop the selected entry |
+| `w` | write to the config file |
 
-### Status Screen
-
-```
-  Daemon Status
-
-  Backend:  pipewire
-  Socket:   /run/user/1000/poweraudio.sock
-  Uptime:   2h 14m
-  Service:  enabled
-
-  Recent Events
-
-  14:32:01  bluetooth connected: JBL Tune 520BT (AA:BB:CC:DD:EE:FF)
-  14:32:02  switched to JBL Tune 520BT
-  13:15:44  bluetooth disconnected: JBL Tune 520BT
-  13:15:44  fallback to Built-in Audio Stereo
-```
+Config, switching section:
 
 | Key | Action |
 |-----|--------|
-| `i` | Install as systemd service |
-| `u` | Uninstall service |
-| `r` | Refresh |
+| `tab` | swap back to priorities |
+| `j` `k` | move |
+| `enter` or `space` | pick the option under the cursor |
+| `w` | write to the config file |
+
+Status:
+
+| Key | Action |
+|-----|--------|
+| `j` `k` | scroll the event log, `g` jumps to newest |
+| `i` | write and enable the systemd user unit |
+| `u` | disable and delete it |
+
+Edits on the config screen are not saved until you press `w`. A yellow
+`unsaved` marker sits next to the heading until you do, and `q` asks once
+before throwing the work away.
 
 ## Configuration
 
-Config is stored at `~/.config/poweraudio/config.toml` (auto-created on first run). You can edit it directly or use the TUI.
+`~/.config/poweraudio/config.toml`, created on first run. Honours
+`XDG_CONFIG_HOME`.
 
 ```toml
 [general]
-backend = "auto"           # "auto", "pipewire", or "pulseaudio"
+backend = "auto"            # auto, pipewire, pulseaudio
 
 [switching]
-on_connect = "always"      # "always", "priority", "never"
-on_disconnect = "priority" # "priority", "previous"
-switch_delay_ms = 500      # delay for PipeWire to settle new devices
+on_connect = "always"       # always, priority, never
+on_disconnect = "priority"  # priority, previous
+switch_delay_ms = 500
+
+[notifications]
+enabled = true
+on_device_change = true
+
+[daemon]
+socket_path = "/run/user/1000/poweraudio.sock"
 
 [[priority]]
 match = "JBL Tune 520BT"
@@ -201,41 +181,89 @@ type = "bluetooth"
 match = "Built-in Audio Analog Stereo"
 ```
 
-### Switching Options
+`backend = "auto"` tries `wpctl status` first and falls back to `pactl info`.
 
-| Setting | Values | Description |
-|---------|--------|-------------|
-| `on_connect` | `always` | Always switch to newly connected device |
-| | `priority` | Only switch if the new device has higher priority |
-| | `never` | Never auto-switch on connect |
-| `on_disconnect` | `priority` | Fall back to highest-priority available device |
-| | `previous` | Fall back to whatever was active before |
+`on_connect` decides what a Bluetooth device connecting is allowed to do.
+`always` takes the output every time. `priority` only takes it when the new
+device outranks whatever is playing, so plugging in earbuds while your USB
+headset is on the list above them changes nothing. `never` leaves the switching
+to you and keeps the daemon around for the event log and the UI.
 
-## Architecture
+`on_disconnect` picks the fallback. `priority` walks your ranking top down and
+takes the first device that is present. `previous` returns to whatever was
+default before the daemon switched away.
+
+`switch_delay_ms` is the head start you give PipeWire to register the new sink
+before the daemon goes looking for it. Raise it if your adapter is slow, though
+the retry ladder covers most of that already.
+
+`socket_path` defaults to `$XDG_RUNTIME_DIR/poweraudio.sock`. The socket is
+created with mode 0600.
+
+Two fields that exist in the file and do nothing yet: `general.log_level` and
+`tui.show_volume`. The daemon logs at a fixed level to stderr, which systemd
+captures, and the UI always draws volume bars.
+
+Pressing `w` in the UI rewrites the whole file from the daemon's in-memory
+config, so comments you added by hand do not survive. Edit the file directly if
+you want to keep them, and restart the daemon to pick the changes up.
+
+## Reading the logs
+
+The daemon keeps its last 200 events in memory and the status screen shows the
+most recent 50, newest first, coloured by what happened. Failures are red,
+switches and fallbacks are green, and skipped or abandoned switches are amber.
+It is the fastest way to see why a switch did not happen.
+`skipping switch: X has lower priority` means `on_connect` is set
+to `priority` and your ranking said no. `giving up waiting for BT sink` means
+BlueZ connected but PipeWire never produced a sink, which is usually a codec or
+profile problem rather than anything poweraudio can fix.
+
+The same lines go to stderr, so `journalctl --user -u poweraudio -f` works when
+the UI is not running.
+
+## How it is put together
+
+One binary, two modes.
+
+`--daemon` runs the event loop. It holds a D-Bus subscription for BlueZ
+property changes, a `pactl subscribe` pipe for sink and default-device changes,
+and a Unix socket serving newline-delimited JSON requests. It shells out to
+`wpctl`, `pw-dump` and `pactl` rather than linking against anything, so there
+is no cgo and no libpipewire version to match.
+
+Without `--daemon` you get the UI, built on Bubble Tea. It owns no audio state.
+Every screen is a view over one JSON round trip to the daemon, refreshed on a
+two second tick, and every action is a request back. Which means the UI can
+come and go, and a daemon with no UI attached behaves identically.
 
 ```
-poweraudio (single binary)
-├── --daemon mode
-│   ├── D-Bus monitor (BlueZ) ──→ Bluetooth connect/disconnect events
-│   ├── Audio event monitor ────→ pactl subscribe (works with PipeWire too)
-│   ├── Priority switcher ─────→ wpctl set-default / pactl set-default-sink
-│   └── IPC server ────────────→ Unix socket (JSON protocol)
-│
-└── TUI mode (default)
-    ├── BubbleTea UI ──────────→ Devices, Config, Status screens
-    └── IPC client ────────────→ Connects to daemon via Unix socket
+internal/audio       backend interface, PipeWire and PulseAudio implementations
+internal/bluetooth   BlueZ D-Bus subscription
+internal/daemon      event loop, switching rules, IPC server
+internal/ipc         wire protocol and client
+internal/tui         Bubble Tea screens
+internal/config      TOML load and save
 ```
 
-- **No CGo** — audio control via `wpctl` / `pactl` / `pw-dump` subprocesses
-- **No root required** — runs as a user service
-- **Minimal dependencies** — BubbleTea for TUI, godbus for D-Bus, BurntSushi/toml for config
+## Troubleshooting
 
-## Requirements
+**The UI says the daemon is offline.** Check `systemctl --user status
+poweraudio`. If the unit is not installed, press `i` on the status screen.
 
-- Linux with PipeWire (recommended) or PulseAudio
-- BlueZ for Bluetooth monitoring
-- Go 1.22+ to build
-- `wpctl` and `pw-dump` (PipeWire) or `pactl` (PulseAudio)
+**Nothing switches when I connect.** Look at the status screen. No
+`bluetooth connected` line means the D-Bus subscription never came up, so check
+that `bluetoothd` is running. A `connected` line with nothing after it means the
+sink never appeared, which you can confirm with `wpctl status` while the device
+is connected.
+
+**It switches to the wrong thing on disconnect.** Your priority list is either
+empty or nothing on it is present, in which case the daemon falls back to the
+first sink it can find. Add the devices you actually use on the config screen.
+
+**Two daemons.** `pgrep -af "poweraudio --daemon"`. If both the systemd unit and
+a manually started copy are running they will fight over the default sink. Kill
+the manual one.
 
 ## License
 

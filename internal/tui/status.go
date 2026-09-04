@@ -18,10 +18,14 @@ type StatusModel struct {
 	err       error
 	actionMsg string
 	actionErr error
+	evOffset  int
+
+	width  int
+	height int
 }
 
 func NewStatusModel() StatusModel {
-	return StatusModel{}
+	return StatusModel{width: defaultWidth, height: defaultHeight - chromeLines}
 }
 
 func (m StatusModel) Update(msg tea.Msg) (StatusModel, tea.Cmd) {
@@ -32,11 +36,24 @@ func (m StatusModel) Update(msg tea.Msg) (StatusModel, tea.Cmd) {
 			return m, installServiceCmd()
 		case "u":
 			return m, uninstallServiceCmd()
+		case "down", "j":
+			if m.evOffset < len(m.events)-1 {
+				m.evOffset++
+			}
+		case "up", "k":
+			if m.evOffset > 0 {
+				m.evOffset--
+			}
+		case "g", "home":
+			m.evOffset = 0
 		}
 	case statusMsg:
 		m.status = msg.status
 		m.events = msg.events
 		m.err = msg.err
+		if m.evOffset > len(m.events) {
+			m.evOffset = max(0, len(m.events)-1)
+		}
 	case serviceActionMsg:
 		m.actionErr = msg.err
 		if msg.err == nil {
@@ -49,68 +66,119 @@ func (m StatusModel) Update(msg tea.Msg) (StatusModel, tea.Cmd) {
 }
 
 func (m StatusModel) View() string {
-	var b strings.Builder
-
-	b.WriteString(styleTitle.Render("Daemon Status"))
-	b.WriteString("\n")
-
-	if m.err != nil {
-		b.WriteString(styleMuted.Render(fmt.Sprintf("Error: %v", m.err)))
-		b.WriteString("\n\n")
-		b.WriteString(styleMuted.Render("Is the daemon running? Start with: poweraudio --daemon"))
-		return b.String()
+	w := m.width
+	if w < minWidth {
+		w = minWidth
+	}
+	h := m.height
+	if h < minContentH {
+		h = minContentH
 	}
 
-	if m.status != nil {
-		svcStatus := "not installed"
-		if serviceFileExists() {
-			if ServiceEnabled() {
-				svcStatus = "enabled"
-			} else {
-				svcStatus = "installed (disabled)"
-			}
-		}
+	if m.err != nil {
+		return frame(h,
+			[]string{"  " + styleTitle.Render("Daemon Status"), ""},
+			[]string{
+				"  " + styleError.Render(truncate(m.err.Error(), w-2)),
+				"",
+				"  " + styleMuted.Render("Start it with: poweraudio --daemon"),
+				"  " + styleMuted.Render("Or install the user service with i"),
+			},
+			[]string{"", helpLine(w, "r retry", "i install service", "? help")},
+		)
+	}
 
-		b.WriteString(fmt.Sprintf("  Backend:  %s\n", styleActive.Render(m.status.Backend)))
-		b.WriteString(fmt.Sprintf("  Socket:   %s\n", styleMuted.Render(m.status.Socket)))
-		b.WriteString(fmt.Sprintf("  Uptime:   %s\n", formatUptime(m.status.UptimeSec)))
-		b.WriteString(fmt.Sprintf("  Service:  %s\n", styleMuted.Render(svcStatus)))
+	visible := m.eventRows()
+
+	header := []string{"  " + styleTitle.Render("Daemon Status"), ""}
+	if m.status != nil {
+		header = append(header,
+			field("Backend", styleActive.Render(m.status.Backend)),
+			field("Socket", styleMuted.Render(truncate(m.status.Socket, w-14))),
+			field("Uptime", styleNormal.Render(formatUptime(m.status.UptimeSec))),
+			field("Service", serviceState()),
+		)
+	} else {
+		header = append(header, "", "", "", "")
 	}
 
 	if m.actionMsg != "" {
-		b.WriteString("\n")
+		line := styleActive.Render(truncate(m.actionMsg, w-2))
 		if m.actionErr != nil {
-			b.WriteString(styleMuted.Render("  " + m.actionMsg))
-		} else {
-			b.WriteString(styleActive.Render("  " + m.actionMsg))
+			line = styleError.Render(truncate(m.actionMsg, w-2))
 		}
-		b.WriteString("\n")
+		header = append(header, "", "  "+line)
 	}
 
-	b.WriteString("\n")
-	b.WriteString(styleSubtitle.Render("Recent Events"))
-	b.WriteString("\n")
+	events := "  " + styleSubtitle.Render("Recent Events")
+	if hint := scrollHint(m.evOffset, visible, len(m.events)); hint != "" {
+		events += styleMuted.Render(fmt.Sprintf("   %s  %d", hint, len(m.events)))
+	}
+	header = append(header, "", events, "")
 
+	var body []string
 	if len(m.events) == 0 {
-		b.WriteString(styleMuted.Render("  No events yet"))
-		b.WriteString("\n")
+		body = []string{"  " + styleMuted.Render("nothing logged yet")}
 	} else {
-		start := 0
-		if len(m.events) > 20 {
-			start = len(m.events) - 20
-		}
-		for i := len(m.events) - 1; i >= start; i-- {
+		// Newest first, which is what you want when a switch just misfired.
+		rows := make([]string, 0, len(m.events))
+		for i := len(m.events) - 1; i >= 0; i-- {
 			ev := m.events[i]
-			ts := ev.Time.Format("15:04:05")
-			b.WriteString(fmt.Sprintf("  %s  %s\n", styleMuted.Render(ts), ev.Message))
+			stamp := styleMuted.Render(ev.Time.Format("15:04:05"))
+			rows = append(rows, "  "+stamp+"  "+renderEvent(ev.Message, w-14))
 		}
+		body = window(rows, m.evOffset, visible)
 	}
 
-	b.WriteString("\n")
-	help := "[r] Refresh  [i] Install service  [u] Uninstall service"
-	b.WriteString(styleHelp.Render(help))
+	footer := []string{
+		"",
+		helpLine(w, "j/k scroll", "r refresh", "i install service", "u remove", "? help"),
+	}
 
-	return b.String()
+	return frame(h, header, body, footer)
+}
+
+// eventRows mirrors the header and footer that View builds, so the scroll
+// bounds match what actually fits.
+func (m StatusModel) eventRows() int {
+	used := 11
+	if m.actionMsg != "" {
+		used += 2
+	}
+	if n := m.height - used; n > 0 {
+		return n
+	}
+	return 1
+}
+
+func field(label, value string) string {
+	return "  " + styleMuted.Render(fit(label, 10)) + value
+}
+
+func serviceState() string {
+	if !serviceFileExists() {
+		return styleMuted.Render("not installed")
+	}
+	if ServiceEnabled() {
+		return styleActive.Render("enabled")
+	}
+	return styleWarn.Render("installed, disabled")
+}
+
+// renderEvent colours a log line by what it says happened. The daemon writes
+// plain sentences, so matching on words is the only signal available.
+func renderEvent(msg string, w int) string {
+	text := truncate(msg, w)
+	l := strings.ToLower(msg)
+	switch {
+	case strings.Contains(l, "fail"), strings.Contains(l, "error"), strings.Contains(l, "unavailable"):
+		return styleError.Render(text)
+	case strings.Contains(l, "switched"), strings.Contains(l, "fallback"):
+		return styleActive.Render(text)
+	case strings.Contains(l, "skipping"), strings.Contains(l, "giving up"), strings.Contains(l, "expired"):
+		return styleWarn.Render(text)
+	}
+	return styleNormal.Render(text)
 }
 
 func formatUptime(seconds int) string {
@@ -167,7 +235,7 @@ func installServiceCmd() tea.Cmd {
 			return serviceActionMsg{err: fmt.Errorf("enable: %s: %w", strings.TrimSpace(string(out)), err)}
 		}
 
-		return serviceActionMsg{status: "Service installed and enabled (will start on next login)"}
+		return serviceActionMsg{status: "Service installed and enabled, starts on next login"}
 	}
 }
 
@@ -180,6 +248,6 @@ func uninstallServiceCmd() tea.Cmd {
 
 		exec.Command("systemctl", "--user", "daemon-reload").Run()
 
-		return serviceActionMsg{status: "Service uninstalled"}
+		return serviceActionMsg{status: "Service removed"}
 	}
 }
