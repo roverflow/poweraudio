@@ -84,7 +84,7 @@ detect() {
         if $PURGE; then
             info "Config: ${CONFIG_DIR} (will be removed)"
         else
-            info "Config: ${CONFIG_DIR} (kept — use --purge to remove)"
+            info "Config: ${CONFIG_DIR} (kept, use --purge to remove)"
         fi
     fi
 

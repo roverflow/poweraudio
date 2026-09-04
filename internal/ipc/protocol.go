@@ -15,7 +15,7 @@ const (
 	MethodGetEvents        = "get_events"
 	MethodGetConfig        = "get_config"
 	MethodUpdatePriorities = "update_priorities"
-	MethodSetVolume         = "set_volume"
+	MethodSetVolume        = "set_volume"
 	MethodToggleMute       = "toggle_mute"
 	MethodUpdateSwitching  = "update_switching"
 	MethodReloadConfig     = "reload_config"

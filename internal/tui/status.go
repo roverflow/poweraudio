@@ -12,6 +12,11 @@ import (
 	"github.com/roverflow/poweraudio/internal/ipc"
 )
 
+// serviceCheckTTL is how stale the systemd answer is allowed to get. Asking
+// systemctl is a subprocess, and View runs on every keystroke, so the state is
+// cached and aged out rather than looked up while drawing.
+const serviceCheckTTL = 10 * time.Second
+
 type StatusModel struct {
 	status    *ipc.StatusData
 	events    []ipc.EventLog
@@ -20,12 +25,29 @@ type StatusModel struct {
 	actionErr error
 	evOffset  int
 
+	svcInstalled bool
+	svcEnabled   bool
+	svcCheckedAt time.Time
+
 	width  int
 	height int
 }
 
 func NewStatusModel() StatusModel {
-	return StatusModel{width: defaultWidth, height: defaultHeight - chromeLines}
+	m := StatusModel{width: defaultWidth, height: defaultHeight - chromeLines}
+	m.checkService(true)
+	return m
+}
+
+// checkService refreshes the cached systemd state. Installing or removing the
+// unit forces it; otherwise it only runs once the previous answer has aged out.
+func (m *StatusModel) checkService(force bool) {
+	if !force && time.Since(m.svcCheckedAt) < serviceCheckTTL {
+		return
+	}
+	m.svcInstalled = serviceFileExists()
+	m.svcEnabled = m.svcInstalled && ServiceEnabled()
+	m.svcCheckedAt = time.Now()
 }
 
 func (m StatusModel) Update(msg tea.Msg) (StatusModel, tea.Cmd) {
@@ -37,13 +59,9 @@ func (m StatusModel) Update(msg tea.Msg) (StatusModel, tea.Cmd) {
 		case "u":
 			return m, uninstallServiceCmd()
 		case "down", "j":
-			if m.evOffset < len(m.events)-1 {
-				m.evOffset++
-			}
+			m.evOffset = clampScroll(m.evOffset+1, len(m.events), m.eventRows())
 		case "up", "k":
-			if m.evOffset > 0 {
-				m.evOffset--
-			}
+			m.evOffset = clampScroll(m.evOffset-1, len(m.events), m.eventRows())
 		case "g", "home":
 			m.evOffset = 0
 		}
@@ -51,9 +69,8 @@ func (m StatusModel) Update(msg tea.Msg) (StatusModel, tea.Cmd) {
 		m.status = msg.status
 		m.events = msg.events
 		m.err = msg.err
-		if m.evOffset > len(m.events) {
-			m.evOffset = max(0, len(m.events)-1)
-		}
+		m.evOffset = clampScroll(m.evOffset, len(m.events), m.eventRows())
+		m.checkService(false)
 	case serviceActionMsg:
 		m.actionErr = msg.err
 		if msg.err == nil {
@@ -61,6 +78,7 @@ func (m StatusModel) Update(msg tea.Msg) (StatusModel, tea.Cmd) {
 		} else {
 			m.actionMsg = "Failed: " + msg.err.Error()
 		}
+		m.checkService(true)
 	}
 	return m, nil
 }
@@ -96,7 +114,7 @@ func (m StatusModel) View() string {
 			field("Backend", styleActive.Render(m.status.Backend)),
 			field("Socket", styleMuted.Render(truncate(m.status.Socket, w-14))),
 			field("Uptime", styleNormal.Render(formatUptime(m.status.UptimeSec))),
-			field("Service", serviceState()),
+			field("Service", m.serviceState()),
 		)
 	} else {
 		header = append(header, "", "", "", "")
@@ -155,11 +173,11 @@ func field(label, value string) string {
 	return "  " + styleMuted.Render(fit(label, 10)) + value
 }
 
-func serviceState() string {
-	if !serviceFileExists() {
+func (m StatusModel) serviceState() string {
+	if !m.svcInstalled {
 		return styleMuted.Render("not installed")
 	}
-	if ServiceEnabled() {
+	if m.svcEnabled {
 		return styleActive.Render("enabled")
 	}
 	return styleWarn.Render("installed, disabled")
@@ -209,11 +227,10 @@ type serviceActionMsg struct {
 
 func installServiceCmd() tea.Cmd {
 	return func() tea.Msg {
-		bin, err := os.Executable()
+		bin, err := resolvedExecutable()
 		if err != nil {
 			return serviceActionMsg{err: err}
 		}
-		bin, _ = filepath.EvalSymlinks(bin)
 
 		serviceDir := filepath.Join(userConfigDir(), "systemd", "user")
 		servicePath := filepath.Join(serviceDir, "poweraudio.service")

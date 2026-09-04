@@ -28,25 +28,32 @@ func main() {
 
 	if *showVersion {
 		fmt.Println("poweraudio", version)
-		os.Exit(0)
+		return
 	}
 
-	cfg, err := config.Load(*configPath)
+	// Resolve once, so the daemon writes changes back to the file it read
+	// rather than to the default location.
+	path := config.ResolvePath(*configPath)
+
+	cfg, err := config.Load(path)
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
 
+	run := runTUI
 	if *daemonMode {
-		runDaemon(cfg)
-	} else {
-		runTUI(cfg)
+		run = runDaemon
+	}
+	if err := run(cfg, path); err != nil {
+		log.Print(err)
+		os.Exit(1)
 	}
 }
 
-func runDaemon(cfg config.Config) {
+func runDaemon(cfg config.Config, configPath string) error {
 	backend, err := detectBackend(cfg.General.Backend)
 	if err != nil {
-		log.Fatalf("audio backend: %v", err)
+		return fmt.Errorf("audio backend: %w", err)
 	}
 	log.Printf("using %s backend", backend.Name())
 
@@ -61,42 +68,43 @@ func runDaemon(cfg config.Config) {
 		cancel()
 	}()
 
-	d := daemon.New(cfg, backend)
+	d := daemon.New(cfg, backend, configPath)
 
 	srv := daemon.NewServer(cfg.Daemon.SocketPath, d)
 	if err := srv.Start(ctx); err != nil {
-		log.Fatalf("ipc server: %v", err)
+		return fmt.Errorf("ipc server: %w", err)
 	}
+	// Returning rather than calling log.Fatal keeps this reachable, so the
+	// socket file does not outlive the daemon.
 	defer srv.Close()
 	log.Printf("listening on %s", cfg.Daemon.SocketPath)
 
 	if err := d.Run(ctx); err != nil && ctx.Err() == nil {
-		log.Fatalf("daemon: %v", err)
+		return fmt.Errorf("daemon: %w", err)
 	}
+	return nil
 }
 
-func runTUI(cfg config.Config) {
+func runTUI(cfg config.Config, _ string) error {
 	client := ipc.NewClient(cfg.Daemon.SocketPath)
 
 	if !client.Ping() {
 		setup := tui.NewSetupModel(client)
-		sp := tea.NewProgram(setup)
-		result, err := sp.Run()
+		result, err := tea.NewProgram(setup).Run()
 		if err != nil {
-			log.Fatalf("setup: %v", err)
+			return fmt.Errorf("setup: %w", err)
 		}
 
 		sm, ok := result.(tui.SetupModel)
 		if !ok || !sm.Done() {
-			return
+			return nil
 		}
 	}
 
-	m := tui.NewModel(client)
-	p := tea.NewProgram(m)
-	if _, err := p.Run(); err != nil {
-		log.Fatalf("tui: %v", err)
+	if _, err := tea.NewProgram(tui.NewModel(client)).Run(); err != nil {
+		return fmt.Errorf("tui: %w", err)
 	}
+	return nil
 }
 
 func detectBackend(preference string) (audio.Backend, error) {

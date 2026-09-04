@@ -74,6 +74,22 @@ func clampOffset(offset, cursor, n, visible int) int {
 	return offset
 }
 
+// clampScroll bounds a cursorless scroll offset, so the last row of a list
+// cannot be dragged up past the top of the window leaving mostly blank space.
+func clampScroll(offset, n, visible int) int {
+	limit := n - visible
+	if limit < 0 {
+		limit = 0
+	}
+	if offset > limit {
+		offset = limit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return offset
+}
+
 // window returns the run of lines starting at offset that fits in visible rows.
 func window(lines []string, offset, visible int) []string {
 	if visible <= 0 || len(lines) == 0 {

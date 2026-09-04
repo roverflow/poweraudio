@@ -36,8 +36,14 @@ func DevicePriority(dev audio.Device, priorities []config.PriorityEntry) int {
 }
 
 func matchesPriority(dev audio.Device, prio config.PriorityEntry) bool {
-	match := strings.ToLower(prio.Match)
-	if prio.Type != "" && strings.ToLower(prio.Type) != strings.ToLower(dev.Type.String()) {
+	match := strings.ToLower(strings.TrimSpace(prio.Match))
+	if match == "" {
+		// strings.Contains is true for the empty string, so an entry with no
+		// match key used to claim every device and quietly outrank the rest
+		// of the list.
+		return false
+	}
+	if prio.Type != "" && !strings.EqualFold(prio.Type, dev.Type.String()) {
 		return false
 	}
 	name := strings.ToLower(dev.Name)

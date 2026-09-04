@@ -31,11 +31,10 @@ func (d *Daemon) handleIPC(ctx context.Context, req IPCRequest) {
 		var params ipc.SetDefaultParams
 		if err := json.Unmarshal(req.Request.Params, &params); err != nil {
 			resp = ipc.ErrorResponse("invalid params: " + err.Error())
-		} else if err := d.backend.SetDefaultSink(ctx, params.DeviceID); err != nil {
+		} else if err := d.SetDefault(ctx, params.DeviceID); err != nil {
 			resp = ipc.ErrorResponse(err.Error())
 		} else {
-			d.logEvent("manual switch to device %s", params.DeviceID)
-			d.refreshDevices(ctx)
+			d.logEvent("manual switch to %s", d.deviceName(params.DeviceID))
 			resp = ipc.SuccessResponse(nil)
 		}
 
@@ -64,7 +63,7 @@ func (d *Daemon) handleIPC(ctx context.Context, req IPCRequest) {
 	case ipc.MethodGetStatus:
 		resp = ipc.SuccessResponse(ipc.StatusData{
 			Backend:   d.backend.Name(),
-			Socket:    d.cfg.Daemon.SocketPath,
+			Socket:    d.Config().Daemon.SocketPath,
 			UptimeSec: int(time.Since(d.startTime).Seconds()),
 		})
 
@@ -86,7 +85,7 @@ func (d *Daemon) handleIPC(ctx context.Context, req IPCRequest) {
 		} else {
 			d.UpdatePriorities(priorities)
 			cfg := d.Config()
-			if err := config.Save("", cfg); err != nil {
+			if err := config.Save(d.ConfigPath(), cfg); err != nil {
 				d.logEvent("failed to save config: %v", err)
 			}
 			d.logEvent("priorities updated (%d entries)", len(priorities))
@@ -103,7 +102,7 @@ func (d *Daemon) handleIPC(ctx context.Context, req IPCRequest) {
 			d.cfg.Switching.OnDisconnect = params.OnDisconnect
 			cfg := d.cfg
 			d.mu.Unlock()
-			if err := config.Save("", cfg); err != nil {
+			if err := config.Save(d.ConfigPath(), cfg); err != nil {
 				d.logEvent("failed to save config: %v", err)
 			}
 			d.logEvent("switching config updated: on_connect=%s on_disconnect=%s",
@@ -112,7 +111,7 @@ func (d *Daemon) handleIPC(ctx context.Context, req IPCRequest) {
 		}
 
 	case ipc.MethodReloadConfig:
-		cfg, err := config.Load("")
+		cfg, err := config.Load(d.ConfigPath())
 		if err != nil {
 			resp = ipc.ErrorResponse(err.Error())
 		} else {

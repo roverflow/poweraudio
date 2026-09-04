@@ -22,7 +22,10 @@ func (p *PipeWire) Name() string {
 }
 
 func (p *PipeWire) ListSinks(ctx context.Context) ([]Device, error) {
-	defaultID, _ := p.defaultSinkID(ctx)
+	// One wpctl run answers both questions the sink list needs from
+	// WirePlumber: which node is default, and what each node's volume is.
+	// Asking per device cost a subprocess per sink on every refresh.
+	defaultID, levels := p.wpctlSinks(ctx)
 
 	out, err := exec.CommandContext(ctx, "pw-dump").Output()
 	if err != nil {
@@ -61,10 +64,13 @@ func (p *PipeWire) ListSinks(ctx context.Context) ([]Device, error) {
 			dev.MACAddress = macFromNodeName(nodeName)
 		}
 
-		vol, muted, err := wpctlGetVolume(ctx, dev.ID)
-		if err == nil {
-			dev.Volume = vol
-			dev.Muted = muted
+		if lvl, ok := levels[dev.ID]; ok {
+			dev.Volume, dev.Muted = lvl.volume, lvl.muted
+		} else if vol, muted, err := wpctlGetVolume(ctx, dev.ID); err == nil {
+			// wpctl status did not list this node, which happens while a sink
+			// is still appearing. Ask about it directly before falling back to
+			// pw-dump, whose scale does not match what set-volume expects.
+			dev.Volume, dev.Muted = vol, muted
 		} else if propVol, ok := e.Info.Params["Props"].([]any); ok {
 			dev.Volume, dev.Muted = extractVolume(propVol)
 		}
@@ -144,36 +150,91 @@ func (p *PipeWire) SubscribeEvents(ctx context.Context) (<-chan Event, error) {
 	return ch, nil
 }
 
-func (p *PipeWire) defaultSinkID(ctx context.Context) (string, error) {
+// sinkLevel is what a single line of the Sinks section says about a node.
+type sinkLevel struct {
+	volume float64
+	muted  bool
+}
+
+// wpctlSinks reads the Sinks section of `wpctl status`. Each row looks like
+//
+//	│  *   67. Ryzen HD Audio Controller Analog Stereo [vol: 0.45]
+//
+// with a box-drawing tree down the left margin, an optional * on the default,
+// the node id, the description, and the volume in the same scale that
+// `wpctl set-volume` accepts. It returns the default node id and a level per
+// node id. A failure here is not fatal: callers fall back per device.
+func (p *PipeWire) wpctlSinks(ctx context.Context) (string, map[string]sinkLevel) {
 	out, err := exec.CommandContext(ctx, "wpctl", "status").Output()
 	if err != nil {
-		return "", err
+		return "", map[string]sinkLevel{}
 	}
+	return parseWpctlStatus(string(out))
+}
 
+// parseWpctlStatus is wpctlSinks without the subprocess, so the shape of the
+// output can be tested against a captured sample.
+func parseWpctlStatus(out string) (string, map[string]sinkLevel) {
+	levels := make(map[string]sinkLevel)
+
+	var defaultID string
 	inSinks := false
-	for _, line := range strings.Split(string(out), "\n") {
-		// wpctl draws a box-drawing tree down the left margin, so the default
-		// marker is never the first character of the raw line. Strip the tree
-		// before looking for it.
+	for _, line := range strings.Split(out, "\n") {
+		// The tree is never part of the content, and the default marker is
+		// never the first character of the raw line. Strip the tree first.
 		clean := strings.TrimSpace(strings.TrimLeft(line, " \t\u2502\u251c\u2514\u2500\u250c\u2510\u2524\u252c\u2534\u253c"))
 
 		if strings.HasSuffix(clean, ":") {
 			inSinks = clean == "Sinks:"
 			continue
 		}
-		if !inSinks || !strings.HasPrefix(clean, "*") {
+		if !inSinks {
 			continue
 		}
 
+		isDefault := strings.HasPrefix(clean, "*")
 		fields := strings.Fields(strings.TrimPrefix(clean, "*"))
 		if len(fields) == 0 {
 			continue
 		}
-		if id := strings.TrimSuffix(fields[0], "."); id != "" {
-			return id, nil
+		id := strings.TrimSuffix(fields[0], ".")
+		if id == "" || strings.Trim(id, "0123456789") != "" {
+			continue
+		}
+
+		if isDefault && defaultID == "" {
+			defaultID = id
+		}
+		if vol, muted, ok := parseVolumeTag(clean); ok {
+			levels[id] = sinkLevel{volume: vol, muted: muted}
 		}
 	}
-	return "", fmt.Errorf("no default sink found in wpctl status")
+	return defaultID, levels
+}
+
+// parseVolumeTag pulls the level out of the "[vol: 0.45]" suffix wpctl appends
+// to each node, which reads "[vol: 0.45 MUTED]" when the node is muted.
+func parseVolumeTag(line string) (float64, bool, bool) {
+	i := strings.Index(line, "[vol:")
+	if i < 0 {
+		return 0, false, false
+	}
+	rest := line[i+len("[vol:"):]
+	j := strings.Index(rest, "]")
+	if j < 0 {
+		return 0, false, false
+	}
+	tag := rest[:j]
+
+	fields := strings.Fields(tag)
+	if len(fields) == 0 {
+		return 0, false, false
+	}
+	v, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil {
+		return 0, false, false
+	}
+	return v, strings.Contains(tag, "MUTED"), true
 }
 
 type pwDumpEntry struct {
@@ -270,30 +331,39 @@ func extractVolume(propsArr []any) (float64, bool) {
 	return 1.0, false
 }
 
+// parsePactlEvent reads a line of `pactl subscribe` output, which looks like
+//
+//	Event 'change' on sink #73
+//
+// Only sinks and the server matter here. Matching the facility by substring
+// meant every sink-input event counted as a change to the outputs, and an
+// application starting or stopping playback emits those constantly.
 func parsePactlEvent(line string) (Event, bool) {
-	lower := strings.ToLower(line)
+	fields := strings.Fields(line)
+	if len(fields) < 4 || fields[0] != "Event" {
+		return Event{}, false
+	}
+	action := strings.Trim(fields[1], "'")
+	facility := fields[3]
 
 	var ev Event
 	switch {
-	case strings.Contains(lower, "'new'") && strings.Contains(lower, "sink"):
-		ev.Type = EventSinkAdded
-	case strings.Contains(lower, "'remove'") && strings.Contains(lower, "sink"):
-		ev.Type = EventSinkRemoved
-	case strings.Contains(lower, "'change'") && strings.Contains(lower, "server"):
+	case facility == "server" && action == "change":
 		ev.Type = EventDefaultChanged
-	case strings.Contains(lower, "'change'") && strings.Contains(lower, "sink"):
+	case facility != "sink":
+		return Event{}, false
+	case action == "new":
+		ev.Type = EventSinkAdded
+	case action == "remove":
+		ev.Type = EventSinkRemoved
+	case action == "change":
 		ev.Type = EventSinkChanged
 	default:
 		return Event{}, false
 	}
 
-	if idx := strings.Index(lower, "#"); idx >= 0 {
-		rest := line[idx+1:]
-		parts := strings.Fields(rest)
-		if len(parts) > 0 {
-			ev.DeviceID = parts[0]
-		}
+	if len(fields) > 4 {
+		ev.DeviceID = strings.TrimPrefix(fields[4], "#")
 	}
-
 	return ev, true
 }

@@ -16,6 +16,18 @@ poweraudio            # terminal UI
 poweraudio --daemon   # daemon in the foreground
 ```
 
+## Flags
+
+| Flag | Meaning |
+|------|---------|
+| `--daemon` | run the daemon in the foreground instead of the UI |
+| `--config PATH` | read and write this file instead of the default |
+| `--version` | print the version and exit |
+
+The daemon writes config changes back to whichever file it was started with, so
+`--config` on the unit and `--config` on the UI do not have to agree for the UI
+to work: the UI talks to the daemon, and the daemon owns the file.
+
 ## Requirements
 
 - Linux with PipeWire or PulseAudio
@@ -75,18 +87,21 @@ Bluetooth connecting is not the same event as an audio sink appearing.
 PipeWire creates the `bluez_output.*` sink some time after BlueZ reports the
 link, so the daemon waits `switch_delay_ms` (500 by default), re-lists sinks,
 and looks for one whose MAC matches or whose name contains the BlueZ alias. If
-the sink still is not there, the event is parked and retried at 200ms, 500ms,
-1s, 2s and 3s, and abandoned after 15 seconds. A `new sink` event from `pactl
-subscribe` also kicks a retry, so slow adapters usually land on the first or
-second attempt rather than waiting out the whole ladder.
+the sink still is not there, the event is parked and retried every 500ms until
+15 seconds have passed. The timer is only a safety net: `pactl subscribe`
+reports the sink appearing, and that event triggers the switch directly, so a
+slow adapter usually lands the moment its sink shows up rather than on the next
+tick.
 
 Once it finds the sink it runs `wpctl set-default <id>`, or
 `pactl set-default-sink <name>` on the PulseAudio backend.
 
-Disconnect is the same shape in reverse. The daemon waits 300ms for the sink
-to vanish, re-lists, and picks a fallback: either the highest ranked entry in
-your priority list that is currently present, or the sink that was default
-before it switched away, depending on `on_disconnect`.
+Disconnect is the same shape in reverse. The daemon waits 300ms for the sink to
+vanish and re-lists. If the sink that was playing is still there, the device
+that disconnected was not the one you were listening to and nothing moves.
+Otherwise it picks a fallback: either the highest ranked entry in your priority
+list that is present, or the sink that was default before it switched away,
+depending on `on_disconnect`.
 
 A priority entry matches a device when `match` is a case-insensitive substring
 of the device's name, description or MAC address. If the entry also sets
@@ -191,11 +206,12 @@ to you and keeps the daemon around for the event log and the UI.
 
 `on_disconnect` picks the fallback. `priority` walks your ranking top down and
 takes the first device that is present. `previous` returns to whatever was
-default before the daemon switched away.
+default before the daemon switched away, and falls through to the ranking when
+that device has gone too.
 
 `switch_delay_ms` is the head start you give PipeWire to register the new sink
 before the daemon goes looking for it. Raise it if your adapter is slow, though
-the retry ladder covers most of that already.
+the retries cover most of that already.
 
 `socket_path` defaults to `$XDG_RUNTIME_DIR/poweraudio.sock`. The socket is
 created with mode 0600.
@@ -215,9 +231,9 @@ most recent 50, newest first, coloured by what happened. Failures are red,
 switches and fallbacks are green, and skipped or abandoned switches are amber.
 It is the fastest way to see why a switch did not happen.
 `skipping switch: X has lower priority` means `on_connect` is set
-to `priority` and your ranking said no. `giving up waiting for BT sink` means
-BlueZ connected but PipeWire never produced a sink, which is usually a codec or
-profile problem rather than anything poweraudio can fix.
+to `priority` and your ranking said no. `giving up waiting for the audio sink
+of X` means BlueZ connected but PipeWire never produced a sink, which is
+usually a codec or profile problem rather than anything poweraudio can fix.
 
 The same lines go to stderr, so `journalctl --user -u poweraudio -f` works when
 the UI is not running.
@@ -261,9 +277,24 @@ is connected.
 empty or nothing on it is present, in which case the daemon falls back to the
 first sink it can find. Add the devices you actually use on the config screen.
 
-**Two daemons.** `pgrep -af "poweraudio --daemon"`. If both the systemd unit and
-a manually started copy are running they will fight over the default sink. Kill
-the manual one.
+**A daemon that will not start.** `another poweraudio daemon is already
+listening` means one is up already, usually the systemd unit. Find it with
+`pgrep -af "poweraudio --daemon"` and stop that one first. The daemon refuses
+to take over a live socket rather than leaving two of them fighting over the
+default sink.
+
+## Working on it
+
+```bash
+go build ./...
+go vet ./...
+go test -race ./...
+```
+
+The tests cover the parsing that talks to `wpctl`, `pactl` and BlueZ, the
+priority matching, the config round trip, the IPC server, and the locking
+around the daemon's shared state. They need no audio server: the backend is
+stubbed and the samples are captured output.
 
 ## License
 

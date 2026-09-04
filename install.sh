@@ -38,23 +38,25 @@ get_current_version() {
     fi
 }
 
+# Runs inside a command substitution, so it must not register the cleanup trap
+# itself. That subshell exits the moment this function returns, and an EXIT
+# trap set here fired then, deleting the build before the caller could install
+# anything out of it. main owns WORKDIR and the trap.
 build_in_tmpdir() {
-    local tmpdir
-    tmpdir=$(mktemp -d)
-    trap "rm -rf '$tmpdir'" EXIT
+    local src="${WORKDIR}/poweraudio"
 
     info "Cloning repository..."
-    git clone --depth 1 "$REPO" "$tmpdir/poweraudio" >&2 2>&1
+    git clone --depth 1 "$REPO" "$src" >&2 2>&1
     ok "Cloned"
 
     info "Building..."
-    cd "$tmpdir/poweraudio"
+    cd "$src"
     local ver
     ver=$(git describe --tags --always 2>/dev/null || echo "dev")
     go build -ldflags "-X main.version=${ver}" -o poweraudio ./cmd/poweraudio
     ok "Built version ${ver}"
 
-    printf "%s" "$tmpdir/poweraudio"
+    printf "%s" "$src"
 }
 
 build_in_place() {
@@ -134,7 +136,7 @@ verify() {
     if systemctl --user is-active "$SERVICE_NAME" &>/dev/null; then
         ok "Service is running"
     else
-        warn "Service is not active — checking logs:"
+        warn "Service is not active, checking logs:"
         systemctl --user status "$SERVICE_NAME" --no-pager -l 2>&1 | head -15 || true
         errors=1
     fi
@@ -153,6 +155,14 @@ verify() {
         return 1
     fi
     return 0
+}
+
+WORKDIR=""
+
+cleanup() {
+    if [[ -n "$WORKDIR" && -d "$WORKDIR" ]]; then
+        rm -rf "$WORKDIR"
+    fi
 }
 
 main() {
@@ -174,6 +184,8 @@ main() {
         info "Running from source tree"
         build_dir=$(build_in_place)
     else
+        WORKDIR=$(mktemp -d)
+        trap cleanup EXIT
         build_dir=$(build_in_tmpdir)
     fi
 

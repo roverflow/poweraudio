@@ -4,12 +4,18 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"os"
+	"time"
 
 	"github.com/roverflow/poweraudio/internal/ipc"
 )
+
+// requestTimeout bounds a single client exchange. A client that connects and
+// then says nothing used to hold a goroutine for the life of the daemon.
+const requestTimeout = 10 * time.Second
 
 type Server struct {
 	socketPath string
@@ -25,6 +31,14 @@ func NewServer(socketPath string, d *Daemon) *Server {
 }
 
 func (s *Server) Start(ctx context.Context) error {
+	// Unlinking the socket unconditionally let a second daemon take the first
+	// one's place, after which both fought over the default sink. Ask first:
+	// anything that answers is a live daemon, anything that does not is a
+	// leftover file from a crash.
+	if conn, err := net.DialTimeout("unix", s.socketPath, time.Second); err == nil {
+		conn.Close()
+		return fmt.Errorf("another poweraudio daemon is already listening on %s", s.socketPath)
+	}
 	os.Remove(s.socketPath)
 
 	ln, err := net.Listen("unix", s.socketPath)
@@ -62,6 +76,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(requestTimeout))
 
 	scanner := bufio.NewScanner(conn)
 	if !scanner.Scan() {

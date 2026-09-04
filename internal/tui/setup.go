@@ -36,8 +36,7 @@ type SetupModel struct {
 }
 
 func NewSetupModel(client *ipc.Client) SetupModel {
-	bin, _ := os.Executable()
-	bin, _ = filepath.EvalSymlinks(bin)
+	bin, _ := resolvedExecutable()
 
 	return SetupModel{
 		client:           client,
@@ -269,6 +268,21 @@ Environment=XDG_RUNTIME_DIR=%%t
 [Install]
 WantedBy=default.target
 `, binaryPath)
+}
+
+// resolvedExecutable is the path to this binary with symlinks followed.
+// filepath.EvalSymlinks returns an empty string on failure, and the previous
+// `bin, _ = EvalSymlinks(bin)` turned that into an exec of "" or a unit file
+// with nothing after ExecStart=. Fall back to the unresolved path instead.
+func resolvedExecutable() (string, error) {
+	bin, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(bin); err == nil && resolved != "" {
+		return resolved, nil
+	}
+	return bin, nil
 }
 
 func serviceFileExists() bool {

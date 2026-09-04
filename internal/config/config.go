@@ -76,10 +76,17 @@ func DefaultPath() string {
 	return filepath.Join(xdgConfigHome(), "poweraudio", "config.toml")
 }
 
-func Load(path string) (Config, error) {
+// ResolvePath fills in the default location for an empty path, so callers can
+// record where the config actually came from and write back to the same file.
+func ResolvePath(path string) string {
 	if path == "" {
-		path = DefaultPath()
+		return DefaultPath()
 	}
+	return path
+}
+
+func Load(path string) (Config, error) {
+	path = ResolvePath(path)
 
 	cfg := DefaultConfig()
 
@@ -106,38 +113,52 @@ func Load(path string) (Config, error) {
 }
 
 func Save(path string, cfg Config) error {
-	if path == "" {
-		path = DefaultPath()
-	}
-
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	return toml.NewEncoder(f).Encode(cfg)
+	return write(ResolvePath(path), cfg, "")
 }
 
 func writeDefault(path string, cfg Config) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	return write(path, cfg, "# poweraudio configuration\n\n")
+}
+
+// write encodes cfg beside the target and renames it into place. Truncating
+// the real file first meant a crash mid-write left a half-written config that
+// the next start refused to parse.
+func write(path string, cfg Config, header string) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 
-	f, err := os.Create(path)
+	f, err := os.CreateTemp(dir, ".config.toml.*")
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	tmp := f.Name()
+	defer os.Remove(tmp)
 
-	_, _ = fmt.Fprintln(f, "# poweraudio configuration")
-	_, _ = fmt.Fprintln(f)
+	if err := encode(f, cfg, header); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
 
-	return toml.NewEncoder(f).Encode(cfg)
+func encode(f *os.File, cfg Config, header string) error {
+	if header != "" {
+		if _, err := fmt.Fprint(f, header); err != nil {
+			return err
+		}
+	}
+	if err := toml.NewEncoder(f).Encode(cfg); err != nil {
+		return err
+	}
+	return f.Sync()
 }
 
 func xdgConfigHome() string {

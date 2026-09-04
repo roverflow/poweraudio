@@ -5,9 +5,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/roverflow/poweraudio/internal/audio"
 	"github.com/roverflow/poweraudio/internal/config"
+)
+
+const (
+	// dialTimeout covers a socket file that exists but has nothing behind it.
+	dialTimeout = 2 * time.Second
+
+	// callTimeout bounds the whole exchange. Without it a wedged daemon hung
+	// the UI's refresh forever instead of showing that it is offline.
+	callTimeout = 5 * time.Second
 )
 
 type Client struct {
@@ -19,11 +29,15 @@ func NewClient(socketPath string) *Client {
 }
 
 func (c *Client) call(req Request) (Response, error) {
-	conn, err := net.Dial("unix", c.socketPath)
+	conn, err := net.DialTimeout("unix", c.socketPath, dialTimeout)
 	if err != nil {
 		return Response{}, fmt.Errorf("connecting to daemon: %w", err)
 	}
 	defer conn.Close()
+
+	if err := conn.SetDeadline(time.Now().Add(callTimeout)); err != nil {
+		return Response{}, fmt.Errorf("setting deadline: %w", err)
+	}
 
 	data, _ := json.Marshal(req)
 	data = append(data, '\n')

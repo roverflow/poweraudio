@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -39,15 +40,16 @@ func (p *PulseAudio) ListSinks(ctx context.Context) ([]Device, error) {
 			Name:        s.Description,
 			Description: s.Description,
 			IsDefault:   s.Name == defaultName,
-			Available:   s.State != "SUSPENDED",
-			Muted:       s.Mute,
+			// Every sink pactl lists exists and can be selected. SUSPENDED is
+			// just the resting state of a sink nobody is playing to, so
+			// treating it as unavailable used to hide most of the machine.
+			Available: true,
+			Muted:     s.Mute,
 		}
 
-		if len(s.Volume) > 0 {
-			for _, ch := range s.Volume {
-				dev.Volume = float64(ch.ValuePercent) / 100.0
-				break
-			}
+		for _, ch := range s.Volume {
+			dev.Volume = parsePercent(ch.ValuePercent)
+			break
 		}
 
 		dev.Type = classifyPulseDevice(s)
@@ -140,18 +142,31 @@ func (p *PulseAudio) defaultSinkName(ctx context.Context) (string, error) {
 }
 
 type pactlSink struct {
-	Name        string                      `json:"name"`
-	Description string                      `json:"description"`
-	State       string                      `json:"state"`
-	Mute        bool                        `json:"mute"`
-	Volume      map[string]pactlSinkVolume  `json:"volume"`
-	Properties  map[string]string           `json:"properties"`
+	Name        string                     `json:"name"`
+	Description string                     `json:"description"`
+	State       string                     `json:"state"`
+	Mute        bool                       `json:"mute"`
+	Volume      map[string]pactlSinkVolume `json:"volume"`
+	Properties  map[string]string          `json:"properties"`
 }
 
 type pactlSinkVolume struct {
-	Value        int    `json:"value"`
-	ValuePercent int    `json:"value_percent"`
+	Value int `json:"value"`
+	// pactl renders this as "40%", not as a number. Decoding it into an int
+	// fails the whole document, which took the entire backend down with it.
+	ValuePercent string `json:"value_percent"`
 	DB           string `json:"db"`
+}
+
+// parsePercent turns pactl's "40%" into 0.40. An unreadable value reports
+// full volume, which is wrong in a way you can see rather than a zero bar
+// that looks deliberate.
+func parsePercent(s string) float64 {
+	n, err := strconv.Atoi(strings.TrimSuffix(strings.TrimSpace(s), "%"))
+	if err != nil {
+		return 1.0
+	}
+	return float64(n) / 100.0
 }
 
 func classifyPulseDevice(s pactlSink) DeviceType {
