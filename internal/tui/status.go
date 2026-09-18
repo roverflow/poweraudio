@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/roverflow/poweraudio/internal/ipc"
 )
 
@@ -17,13 +18,26 @@ import (
 // cached and aged out rather than looked up while drawing.
 const serviceCheckTTL = 10 * time.Second
 
-type StatusModel struct {
-	status    *ipc.StatusData
-	events    []ipc.EventLog
-	err       error
-	actionMsg string
-	actionErr error
-	evOffset  int
+const (
+	// statusFullHeader is the title, a blank, four fields, a blank, the log
+	// heading and a blank.
+	statusFullHeader = 9
+
+	// statusTightHeader is the title and a blank, which is what is left when
+	// the terminal is too short for the fields.
+	statusTightHeader = 2
+
+	// statusStampFormat carries the date because the log spans days, and a
+	// bare clock made yesterday's failure look like this morning's.
+	statusStampFormat = "Jan 02 15:04:05"
+)
+
+type statusModel struct {
+	status ipc.StatusData
+	events []ipc.EventLog
+	ready  bool
+
+	evOffset int
 
 	svcInstalled bool
 	svcEnabled   bool
@@ -33,31 +47,35 @@ type StatusModel struct {
 	height int
 }
 
-func NewStatusModel() StatusModel {
-	m := StatusModel{width: defaultWidth, height: defaultHeight - chromeLines}
+func newStatusModel() statusModel {
+	m := statusModel{width: defaultWidth, height: defaultHeight - chromeLines}
 	m.checkService(true)
 	return m
 }
 
 // checkService refreshes the cached systemd state. Installing or removing the
 // unit forces it; otherwise it only runs once the previous answer has aged out.
-func (m *StatusModel) checkService(force bool) {
+func (m *statusModel) checkService(force bool) {
 	if !force && time.Since(m.svcCheckedAt) < serviceCheckTTL {
 		return
 	}
 	m.svcInstalled = serviceFileExists()
-	m.svcEnabled = m.svcInstalled && ServiceEnabled()
+	m.svcEnabled = m.svcInstalled && serviceEnabled()
 	m.svcCheckedAt = time.Now()
 }
 
-func (m StatusModel) Update(msg tea.Msg) (StatusModel, tea.Cmd) {
+func (m statusModel) Update(msg tea.Msg) (statusModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "i":
-			return m, installServiceCmd()
+			if !m.svcInstalled {
+				return m, installServiceCmd()
+			}
 		case "u":
-			return m, uninstallServiceCmd()
+			if m.svcInstalled {
+				return m, removeServiceCmd()
+			}
 		case "down", "j":
 			m.evOffset = clampScroll(m.evOffset+1, len(m.events), m.eventRows())
 		case "up", "k":
@@ -65,74 +83,62 @@ func (m StatusModel) Update(msg tea.Msg) (StatusModel, tea.Cmd) {
 		case "g", "home":
 			m.evOffset = 0
 		}
-	case statusMsg:
-		m.status = msg.status
-		m.events = msg.events
-		m.err = msg.err
-		m.evOffset = clampScroll(m.evOffset, len(m.events), m.eventRows())
-		m.checkService(false)
-	case serviceActionMsg:
-		m.actionErr = msg.err
-		if msg.err == nil {
-			m.actionMsg = msg.status
-		} else {
-			m.actionMsg = "Failed: " + msg.err.Error()
-		}
-		m.checkService(true)
 	}
 	return m, nil
 }
 
-func (m StatusModel) View() string {
-	w := m.width
-	if w < minWidth {
-		w = minWidth
-	}
-	h := m.height
-	if h < minContentH {
-		h = minContentH
-	}
+func (m *statusModel) setSnapshot(snap ipc.Snapshot) {
+	m.status = snap.Status
+	m.events = snap.Events
+	m.ready = true
+	m.evOffset = clampScroll(m.evOffset, len(m.events), m.eventRows())
+	m.checkService(false)
+}
 
-	if m.err != nil {
+func (m statusModel) scroll(delta int) (statusModel, tea.Cmd) {
+	m.evOffset = clampScroll(m.evOffset+delta, len(m.events), m.eventRows())
+	return m, nil
+}
+
+func (m statusModel) View() string {
+	w, h := screenSize(m.width, m.height)
+
+	if !m.ready {
 		return frame(h,
 			[]string{"  " + styleTitle.Render("Daemon Status"), ""},
 			[]string{
-				"  " + styleError.Render(truncate(m.err.Error(), w-2)),
+				"  " + styleMuted.Render("The daemon is not answering"),
 				"",
 				"  " + styleMuted.Render("Start it with: poweraudio --daemon"),
 				"  " + styleMuted.Render("Or install the user service with i"),
 			},
-			[]string{"", helpLine(w, "r retry", "i install service", "? help")},
+			[]string{"", helpLine(w, "r reconnect", "i install service", "? help", "q quit")},
 		)
 	}
 
 	visible := m.eventRows()
+	fields := statusShowsFields(h)
 
-	header := []string{"  " + styleTitle.Render("Daemon Status"), ""}
-	if m.status != nil {
-		header = append(header,
-			field("Backend", styleActive.Render(m.status.Backend)),
-			field("Socket", styleMuted.Render(truncate(m.status.Socket, w-14))),
-			field("Uptime", styleNormal.Render(formatUptime(m.status.UptimeSec))),
-			field("Service", m.serviceState()),
-		)
-	} else {
-		header = append(header, "", "", "", "")
+	title := "  " + styleTitle.Render("Daemon Status")
+	if !fields {
+		title += styleMuted.Render("   " + m.status.Backend)
 	}
-
-	if m.actionMsg != "" {
-		line := styleActive.Render(truncate(m.actionMsg, w-2))
-		if m.actionErr != nil {
-			line = styleError.Render(truncate(m.actionMsg, w-2))
-		}
-		header = append(header, "", "  "+line)
-	}
-
-	events := "  " + styleSubtitle.Render("Recent Events")
 	if hint := scrollHint(m.evOffset, visible, len(m.events)); hint != "" {
-		events += styleMuted.Render(fmt.Sprintf("   %s  %d", hint, len(m.events)))
+		title += styleMuted.Render(fmt.Sprintf("   %s  %d", hint, len(m.events)))
 	}
-	header = append(header, "", events, "")
+
+	header := []string{title, ""}
+	if fields {
+		header = append(header,
+			field("Backend", styleActive.Render(truncate(m.status.Backend, w-14))),
+			field("Config", styleMuted.Render(truncate(m.status.ConfigPath, w-14))),
+			field("Uptime", styleNormal.Render(m.uptime())),
+			field("Service", m.serviceState()),
+			"",
+			"  "+styleSubtitle.Render("Recent Events"),
+			"",
+		)
+	}
 
 	var body []string
 	if len(m.events) == 0 {
@@ -141,39 +147,60 @@ func (m StatusModel) View() string {
 		// Newest first, which is what you want when a switch just misfired.
 		rows := make([]string, 0, len(m.events))
 		for i := len(m.events) - 1; i >= 0; i-- {
-			ev := m.events[i]
-			stamp := styleMuted.Render(ev.Time.Format("15:04:05"))
-			rows = append(rows, "  "+stamp+"  "+renderEvent(ev.Message, w-14))
+			rows = append(rows, eventRow(m.events[i], w))
 		}
 		body = window(rows, m.evOffset, visible)
 	}
 
-	footer := []string{
-		"",
-		helpLine(w, "j/k scroll", "r refresh", "i install service", "u remove", "? help"),
+	footer := []string{helpLine(w, m.helpHints()...)}
+	if fields {
+		footer = append([]string{""}, footer...)
 	}
 
 	return frame(h, header, body, footer)
 }
 
+// helpHints offers the service key that applies. Offering both used to tell
+// someone with no unit file that they could remove it.
+func (m statusModel) helpHints() []string {
+	hints := []string{"j/k scroll", "r refresh"}
+	if m.svcInstalled {
+		hints = append(hints, "u remove service")
+	} else {
+		hints = append(hints, "i install service")
+	}
+	return append(hints, "? help", "q quit")
+}
+
+// statusShowsFields drops the fields on a short terminal. The fixed header
+// used to eat the whole budget at fourteen rows, and frame then clipped the
+// log and the help line off the bottom.
+func statusShowsFields(height int) bool {
+	return height-statusFullHeader-2 >= 2
+}
+
 // eventRows mirrors the header and footer that View builds, so the scroll
 // bounds match what actually fits.
-func (m StatusModel) eventRows() int {
-	used := 11
-	if m.actionMsg != "" {
-		used += 2
+func (m statusModel) eventRows() int {
+	_, h := screenSize(m.width, m.height)
+	used := statusTightHeader + 1
+	if statusShowsFields(h) {
+		used = statusFullHeader + 2
 	}
-	if n := m.height - used; n > 0 {
+	if n := h - used; n > 0 {
 		return n
 	}
 	return 1
 }
 
-func field(label, value string) string {
-	return "  " + styleMuted.Render(fit(label, 10)) + value
+func (m statusModel) uptime() string {
+	if m.status.StartedAt.IsZero() {
+		return "unknown"
+	}
+	return formatUptime(time.Since(m.status.StartedAt))
 }
 
-func (m StatusModel) serviceState() string {
+func (m statusModel) serviceState() string {
 	if !m.svcInstalled {
 		return styleMuted.Render("not installed")
 	}
@@ -183,27 +210,35 @@ func (m StatusModel) serviceState() string {
 	return styleWarn.Render("installed, disabled")
 }
 
-// renderEvent colours a log line by what it says happened. The daemon writes
-// plain sentences, so matching on words is the only signal available.
-func renderEvent(msg string, w int) string {
-	text := truncate(msg, w)
-	l := strings.ToLower(msg)
-	switch {
-	case strings.Contains(l, "fail"), strings.Contains(l, "error"), strings.Contains(l, "unavailable"):
-		return styleError.Render(text)
-	case strings.Contains(l, "switched"), strings.Contains(l, "fallback"):
-		return styleActive.Render(text)
-	case strings.Contains(l, "skipping"), strings.Contains(l, "giving up"), strings.Contains(l, "expired"):
-		return styleWarn.Render(text)
-	}
-	return styleNormal.Render(text)
+// eventRow stamps a log line with its date and colours it by the level the
+// daemon recorded. Matching keywords in the sentence used to call a successful
+// "switch failed over" line an error.
+func eventRow(ev ipc.EventLog, width int) string {
+	stamp := styleMuted.Render(ev.Time.Format(statusStampFormat))
+	text := truncate(ev.Message, width-21)
+	return "  " + stamp + "  " + eventStyle(ev.Level).Render(text)
 }
 
-func formatUptime(seconds int) string {
-	d := time.Duration(seconds) * time.Second
+func eventStyle(level ipc.Level) lipgloss.Style {
+	switch level {
+	case ipc.LevelDebug:
+		return styleMuted
+	case ipc.LevelWarn:
+		return styleWarn
+	case ipc.LevelError:
+		return styleError
+	default:
+		return styleNormal
+	}
+}
+
+func formatUptime(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
 	h := int(d.Hours())
 	m := int(d.Minutes()) % 60
-	s := seconds % 60
+	s := int(d.Seconds()) % 60
 
 	if h > 0 {
 		return fmt.Sprintf("%dh %dm", h, m)
@@ -212,12 +247,6 @@ func formatUptime(seconds int) string {
 		return fmt.Sprintf("%dm %ds", m, s)
 	}
 	return fmt.Sprintf("%ds", s)
-}
-
-type statusMsg struct {
-	status *ipc.StatusData
-	events []ipc.EventLog
-	err    error
 }
 
 type serviceActionMsg struct {
@@ -256,15 +285,18 @@ func installServiceCmd() tea.Cmd {
 	}
 }
 
-func uninstallServiceCmd() tea.Cmd {
+// removeServiceCmd stops the running unit as well as disabling it. Leaving out
+// --now disabled the unit for the next login and left the daemon running, so
+// the UI reported the service gone while it was still switching sinks.
+func removeServiceCmd() tea.Cmd {
 	return func() tea.Msg {
-		exec.Command("systemctl", "--user", "disable", "poweraudio").Run()
+		exec.Command("systemctl", "--user", "disable", "--now", "poweraudio").Run()
 
 		servicePath := filepath.Join(userConfigDir(), "systemd", "user", "poweraudio.service")
 		os.Remove(servicePath)
 
 		exec.Command("systemctl", "--user", "daemon-reload").Run()
 
-		return serviceActionMsg{status: "Service removed"}
+		return serviceActionMsg{status: "Service stopped and removed"}
 	}
 }

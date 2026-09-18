@@ -42,10 +42,16 @@ func (m *Monitor) Subscribe(ctx context.Context) (<-chan Event, error) {
 		return nil, fmt.Errorf("adding D-Bus match: %w", err)
 	}
 
-	signals := make(chan *dbus.Signal, 32)
+	// godbus drops signals rather than blocking when the channel it was given
+	// is full, and this one carries every PropertiesChanged under /org/bluez,
+	// most of which are not ours. A connect lost that way is a switch that
+	// never happens, so there is room here for a burst.
+	signals := make(chan *dbus.Signal, 256)
 	m.conn.Signal(signals)
 
-	ch := make(chan Event, 16)
+	// The consumer sleeps through switch_delay_ms while it waits for the sink
+	// of a device that just connected, so events queue up behind it.
+	ch := make(chan Event, 64)
 	go func() {
 		defer close(ch)
 		for {

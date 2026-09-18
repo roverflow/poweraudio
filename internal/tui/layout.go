@@ -7,15 +7,24 @@ const (
 	defaultWidth  = 80
 	defaultHeight = 24
 
-	// Floors. Below these the layout stops shrinking and starts clipping,
-	// which is uglier but never wraps and corrupts the frame.
-	minWidth    = 40
-	minContentH = 8
-
 	// Lines Model.View spends outside the screen content: the tab bar, a
 	// blank line, another blank line and the status bar.
 	chromeLines = 4
 )
+
+// screenSize is the drawing area a screen gets, floored at one cell so the
+// arithmetic below never goes negative. Screens are given the real terminal
+// size rather than a minimum, because clamping to a minimum drew rows wider
+// and taller than the terminal and corrupted the frame on small windows.
+func screenSize(width, height int) (int, int) {
+	if width < 1 {
+		width = 1
+	}
+	if height < 1 {
+		height = 1
+	}
+	return width, height
+}
 
 // runeLen counts characters rather than bytes so that padding and truncation
 // line up for device names that are not pure ASCII.

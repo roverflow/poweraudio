@@ -1,8 +1,8 @@
 # poweraudio
 
-A daemon and terminal UI that moves your Linux audio output to your Bluetooth
-headphones when they connect, and puts it back somewhere sensible when they
-disconnect.
+A daemon, a terminal UI and a small command line tool that move your Linux
+audio output to your Bluetooth headphones when they connect, and put it back
+somewhere sensible when they disconnect.
 
 Linux desktops mostly get the first half of that wrong and the second half
 badly. Connect your earbuds and audio keeps playing through the speakers.
@@ -12,26 +12,63 @@ watches BlueZ over D-Bus and switches the default sink itself, using a ranked
 list of devices you set once.
 
 ```
-poweraudio            # terminal UI
-poweraudio --daemon   # daemon in the foreground
+poweraudio                 # terminal UI
+poweraudio daemon          # daemon in the foreground
+poweraudio next            # cycle the output, bind it to a media key
+poweraudio watch           # one line per change, for a status bar
 ```
 
-## Flags
+## Command line
 
-| Flag | Meaning |
-|------|---------|
-| `--daemon` | run the daemon in the foreground instead of the UI |
-| `--config PATH` | read and write this file instead of the default |
-| `--version` | print the version and exit |
+```
+poweraudio [--config PATH] [--version] [--daemon] [<command> [args]]
+```
 
-The daemon writes config changes back to whichever file it was started with, so
-`--config` on the unit and `--config` on the UI do not have to agree for the UI
-to work: the UI talks to the daemon, and the daemon owns the file.
+Without a command poweraudio opens the terminal UI.
+
+| Command | What it does |
+|---------|--------------|
+| `list [--json]` | output devices, one per line, `*` on the default |
+| `status [--json]` | default device, backend, config path, uptime, recent events |
+| `set <query>` | make a device the default output |
+| `next` | switch to the next available device, wrapping around |
+| `volume <+N\|-N\|N> [--device Q]` | set or adjust the volume, 0 to 150 percent |
+| `mute [--device Q]` | toggle mute and print the new state |
+| `watch [--json]` | print a line every time the default device or its level changes |
+| `reload` | make the daemon re-read its config file |
+| `daemon` | run the daemon in the foreground, same as `--daemon` |
+| `help` | print the usage text |
+
+A query matches a device id, name, description or MAC address, exactly or as a
+case-insensitive substring. `set razer` is enough when only one device is a
+Razer; `set analog` on a machine with three analog outputs lists all three and
+exits 1. `volume` and `mute` act on the default device unless `--device` says
+otherwise.
+
+Output is plain text with no colour. Exit codes: 0 on success, 1 when the daemon
+is not running or refused the request, 2 for a bad command line.
+
+```
+$ poweraudio list
+   Razer Barracuda X Analog Stereo           USB      45%  alsa_output.usb-1532_Razer_Barracuda_X-01.analog-stereo
+*  Ryzen HD Audio Controller Analog Stereo   Speaker  53%  alsa_output.pci-0000_0e_00.6.analog-stereo
+
+$ poweraudio watch
+Ryzen HD Audio Controller Analog Stereo  53%
+JBL Tune 520BT  80%
+JBL Tune 520BT  muted
+```
+
+`--daemon` and `--config` work as before. The daemon writes config changes
+back to whichever file it was started with, so `--config` on the unit and
+`--config` on the UI do not have to agree: the UI talks to the daemon, and the
+daemon owns the file.
 
 ## Requirements
 
-- Linux with PipeWire or PulseAudio
-- `wpctl` and `pw-dump` for the PipeWire backend, `pactl` for either
+- Linux with PipeWire (with pipewire-pulse, which every desktop install ships)
+  or PulseAudio
+- `pactl`, which comes with either
 - BlueZ on the system bus, for the Bluetooth half
 - systemd user session, if you want the daemon to start on login
 - `notify-send` for desktop notifications, optional
@@ -62,7 +99,8 @@ health check. `make build` alone just produces `./poweraudio` in the checkout.
 
 You can skip all of it and run `poweraudio`. If nothing is listening on the
 socket, the first screen offers to start a daemon for this session or install
-the user service, and gets out of the way once one is up.
+the user service, and gets out of the way once one is up. A daemon started for
+the session logs to `~/.local/state/poweraudio/daemon.log`.
 
 ## Removing it
 
@@ -91,10 +129,10 @@ the sink still is not there, the event is parked and retried every 500ms until
 15 seconds have passed. The timer is only a safety net: `pactl subscribe`
 reports the sink appearing, and that event triggers the switch directly, so a
 slow adapter usually lands the moment its sink shows up rather than on the next
-tick.
+tick. A parked device is only forgotten when that same device disconnects, so
+a second headset going away does not cancel the first one's switch.
 
-Once it finds the sink it runs `wpctl set-default <id>`, or
-`pactl set-default-sink <name>` on the PulseAudio backend.
+Once it finds the sink it runs `pactl set-default-sink <name>`.
 
 Disconnect is the same shape in reverse. The daemon waits 300ms for the sink to
 vanish and re-lists. If the sink that was playing is still there, the device
@@ -104,15 +142,17 @@ list that is present, or the sink that was default before it switched away,
 depending on `on_disconnect`.
 
 A priority entry matches a device when `match` is a case-insensitive substring
-of the device's name, description or MAC address. If the entry also sets
-`type`, the device's detected type has to equal it. Order in the file is the
-ranking, first is highest.
+of the device's name, its technical sink name or its MAC address. If the entry
+also sets `type`, the device's detected type has to equal it. Order in the file
+is the ranking, first is highest. The UI and the daemon share the one matcher,
+so the green dot next to an entry means the daemon would match it too.
 
-The PipeWire backend decides a device's type from its `pw-dump` properties:
-`device.api` of `bluez5` or a `node.name` starting with `bluez_` means
-Bluetooth, `device.bus` of `usb` means USB, a name containing `hdmi` or
-`displayport` means HDMI, a name containing `headphone` means Headphone, and
-anything left is Speaker.
+Device types come from the properties pactl reports. `device.api` of `bluez5`,
+an `api.bluez5.address`, or a sink name starting with `bluez_` means Bluetooth.
+`device.form.factor` of `headphone` or `headset` means Headphone, `device.bus`
+of `usb` means USB, a name containing `hdmi` or `displayport` means HDMI, and
+anything left is Speaker. Plain PulseAudio publishes fewer of those properties,
+so the names get a second look before a device is called a speaker.
 
 ## Keys
 
@@ -120,20 +160,26 @@ Anywhere:
 
 | Key | Action |
 |-----|--------|
-| `d` `p` `s` | devices, config, status (or `1` `2` `3`) |
+| `d` `c` `s` | devices, config, status (or `1` `2` `3`) |
 | `?` | toggle the key reference, `esc` closes it |
-| `r` | refresh from the daemon |
+| `r` | refresh, and reconnect if the daemon went away |
 | `q` | quit, asks once if the config screen has unsaved edits |
 | `ctrl+c` | quit without asking |
+| mouse | click a tab or a row, wheel scrolls the list under the pointer |
 
 Devices:
 
 | Key | Action |
 |-----|--------|
 | `j` `k` | move, also `g` `G` `pgup` `pgdn` |
-| `enter` | make the selected device the default output |
+| `enter` | make the selected device the default output, also a second click on it |
 | `h` `l` | volume down and up in 5% steps, 0 to 150 |
+| `H` `L` | volume in 1% steps |
 | `m` | mute or unmute |
+
+The panel under the list shows the selected device's technical sink name, MAC,
+volume, and where it sits on the priority list. It disappears first when the
+terminal is short.
 
 Config, priorities section:
 
@@ -142,7 +188,7 @@ Config, priorities section:
 | `tab` | swap to the switching rules |
 | `j` `k` | move, falling off the bottom of the ranked list enters the device list below it |
 | `J` `K` | move the selected entry up or down the ranking |
-| `enter` | add the highlighted device to the ranking |
+| `enter` | add the highlighted device to the ranking, or play through the selected entry |
 | `x` | drop the selected entry |
 | `w` | write to the config file |
 
@@ -160,12 +206,18 @@ Status:
 | Key | Action |
 |-----|--------|
 | `j` `k` | scroll the event log, `g` jumps to newest |
-| `i` | write and enable the systemd user unit |
-| `u` | disable and delete it |
+| `i` | write and enable the systemd user unit, shown only when it is not installed |
+| `u` | stop, disable and delete it, shown only when it is |
 
 Edits on the config screen are not saved until you press `w`. A yellow
 `unsaved` marker sits next to the heading until you do, and `q` asks once
-before throwing the work away.
+before throwing the work away. A failed write shows up as an error in the
+status bar, not as a silent success.
+
+The UI does not poll. It holds one connection to the daemon, which pushes a
+fresh snapshot every time a device, the log or the config changes, so a switch
+shows up the moment it happens. If the daemon goes away the status bar reads
+`daemon offline` and the UI reconnects on its own once it is back.
 
 ## Configuration
 
@@ -174,7 +226,9 @@ before throwing the work away.
 
 ```toml
 [general]
-backend = "auto"            # auto, pipewire, pulseaudio
+backend = "auto"            # kept for older files, every value means pactl
+log_level = "info"          # debug, info, warn, error
+# log_file = "/home/you/.local/state/poweraudio/daemon.log"
 
 [switching]
 on_connect = "always"       # always, priority, never
@@ -196,13 +250,18 @@ type = "bluetooth"
 match = "Built-in Audio Analog Stereo"
 ```
 
-`backend = "auto"` tries `wpctl status` first and falls back to `pactl info`.
+The daemon reloads the file on its own when it changes on disk, checking the
+modification time every two seconds, so editing by hand needs no restart. A
+file that fails to parse is logged and ignored, and the running config stays.
+`poweraudio reload` forces a read right away.
 
 `on_connect` decides what a Bluetooth device connecting is allowed to do.
 `always` takes the output every time. `priority` only takes it when the new
 device outranks whatever is playing, so plugging in earbuds while your USB
-headset is on the list above them changes nothing. `never` leaves the switching
-to you and keeps the daemon around for the event log and the UI.
+headset is on the list above them changes nothing. Two devices that are both
+off the list tie, so `priority` with an empty ranking never switches; the UI
+says so next to the option. `never` leaves the switching to you and keeps the
+daemon around for the event log and the UI.
 
 `on_disconnect` picks the fallback. `priority` walks your ranking top down and
 takes the first device that is present. `previous` returns to whatever was
@@ -213,75 +272,91 @@ that device has gone too.
 before the daemon goes looking for it. Raise it if your adapter is slow, though
 the retries cover most of that already.
 
+`log_level` is the lowest level written to stderr, which systemd captures. The
+in-memory log the UI shows keeps every level regardless. `log_file` appends the
+same lines to a file, useful for a daemon that was not started by systemd.
+
 `socket_path` defaults to `$XDG_RUNTIME_DIR/poweraudio.sock`. The socket is
 created with mode 0600.
 
-Two fields that exist in the file and do nothing yet: `general.log_level` and
-`tui.show_volume`. The daemon logs at a fixed level to stderr, which systemd
-captures, and the UI always draws volume bars.
+`tui.show_volume` exists in the file and does nothing. The UI always draws
+volume bars.
 
 Pressing `w` in the UI rewrites the whole file from the daemon's in-memory
 config, so comments you added by hand do not survive. Edit the file directly if
-you want to keep them, and restart the daemon to pick the changes up.
+you want to keep them; the daemon picks the change up within two seconds.
 
 ## Reading the logs
 
-The daemon keeps its last 200 events in memory and the status screen shows the
-most recent 50, newest first, coloured by what happened. Failures are red,
-switches and fallbacks are green, and skipped or abandoned switches are amber.
-It is the fastest way to see why a switch did not happen.
-`skipping switch: X has lower priority` means `on_connect` is set
-to `priority` and your ranking said no. `giving up waiting for the audio sink
-of X` means BlueZ connected but PipeWire never produced a sink, which is
-usually a codec or profile problem rather than anything poweraudio can fix.
+The daemon keeps its last 200 events in memory. The status screen shows them
+newest first with a date, coloured by level: debug lines are dimmed, warnings
+are amber, failures are red. Sinks appearing and going away are debug lines
+and name the device rather than a number. `poweraudio status` prints the last
+ten from a shell.
+
+`skipping switch: X is not ranked above Y` means `on_connect` is set to
+`priority` and your ranking said no. `giving up waiting for the audio sink of
+X` means BlueZ connected but PipeWire never produced a sink, which is usually a
+codec or profile problem rather than anything poweraudio can fix.
 
 The same lines go to stderr, so `journalctl --user -u poweraudio -f` works when
 the UI is not running.
 
 ## How it is put together
 
-One binary, two modes.
+One binary, three faces.
 
-`--daemon` runs the event loop. It holds a D-Bus subscription for BlueZ
-property changes, a `pactl subscribe` pipe for sink and default-device changes,
-and a Unix socket serving newline-delimited JSON requests. It shells out to
-`wpctl`, `pw-dump` and `pactl` rather than linking against anything, so there
-is no cgo and no libpipewire version to match.
+`poweraudio daemon` runs the event loop. It holds a D-Bus subscription for
+BlueZ property changes, a `pactl subscribe` pipe for sink and default-device
+changes, a two second check on the config file's modification time, and a Unix
+socket serving newline-delimited JSON requests. It shells out to `pactl` rather
+than linking against anything, so there is no cgo and no libpipewire version
+to match. Listing sinks costs one small JSON document per refresh; the previous
+backend parsed the entire PipeWire object graph, about half a megabyte, to find
+four sinks.
 
-Without `--daemon` you get the UI, built on Bubble Tea. It owns no audio state.
-Every screen is a view over one JSON round trip to the daemon, refreshed on a
-two second tick, and every action is a request back. Which means the UI can
+Without arguments you get the UI, built on Bubble Tea. It owns no audio state.
+It opens one `subscribe` connection and the daemon pushes a snapshot of
+devices, status, events and config after every change, coalesced so a burst of
+changes is one redraw. Every action is a request back. Which means the UI can
 come and go, and a daemon with no UI attached behaves identically.
 
+With a command you get the CLI, which is one snapshot in and at most one
+request out, printed plainly.
+
 ```
-internal/audio       backend interface, PipeWire and PulseAudio implementations
+internal/audio       one pactl backend behind the Backend interface
 internal/bluetooth   BlueZ D-Bus subscription
-internal/daemon      event loop, switching rules, IPC server
+internal/priority    the matcher the daemon and the UI share
+internal/daemon      event loop, switching rules, IPC server, subscriptions
 internal/ipc         wire protocol and client
 internal/tui         Bubble Tea screens
+internal/cli         subcommands
 internal/config      TOML load and save
 ```
 
 ## Troubleshooting
 
 **The UI says the daemon is offline.** Check `systemctl --user status
-poweraudio`. If the unit is not installed, press `i` on the status screen.
+poweraudio`. If the unit is not installed, press `i` on the status screen. The
+UI reconnects on its own once a daemon answers.
 
-**Nothing switches when I connect.** Look at the status screen. No
-`bluetooth connected` line means the D-Bus subscription never came up, so check
-that `bluetoothd` is running. A `connected` line with nothing after it means the
-sink never appeared, which you can confirm with `wpctl status` while the device
-is connected.
+**Nothing switches when I connect.** Look at the status screen or run
+`poweraudio status`. No `bluetooth connected` line means the D-Bus subscription
+never came up, so check that `bluetoothd` is running. A `connected` line with
+nothing after it means the sink never appeared, which you can confirm with
+`pactl list sinks short` while the device is connected.
 
 **It switches to the wrong thing on disconnect.** Your priority list is either
 empty or nothing on it is present, in which case the daemon falls back to the
 first sink it can find. Add the devices you actually use on the config screen.
 
-**A daemon that will not start.** `another poweraudio daemon is already
-listening` means one is up already, usually the systemd unit. Find it with
-`pgrep -af "poweraudio --daemon"` and stop that one first. The daemon refuses
-to take over a live socket rather than leaving two of them fighting over the
-default sink.
+**The unit is inactive but a daemon is running.** A daemon that finds another
+one already listening logs `another poweraudio daemon is already listening` and
+exits 0. That is deliberate: the unit restarts on failure every five seconds,
+and a session daemon holding the socket used to keep it in that loop until
+logout. Stop the session daemon and start the unit, or just keep using the one
+you have.
 
 ## Working on it
 
@@ -291,10 +366,12 @@ go vet ./...
 go test -race ./...
 ```
 
-The tests cover the parsing that talks to `wpctl`, `pactl` and BlueZ, the
-priority matching, the config round trip, the IPC server, and the locking
-around the daemon's shared state. They need no audio server: the backend is
-stubbed and the samples are captured output.
+The tests cover the parsing that talks to `pactl` and BlueZ, the priority
+matching, the config round trip, the IPC server including the subscription
+stream, the locking around the daemon's shared state, the config file watch,
+every CLI command against a fake client, and the UI's screens at five terminal
+sizes. They need no audio server: the backend is stubbed and the samples are
+captured output.
 
 ## License
 

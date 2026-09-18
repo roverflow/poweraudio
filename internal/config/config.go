@@ -35,11 +35,11 @@ type NotificationsConfig struct {
 }
 
 type DaemonConfig struct {
-	SocketPath string `toml:"socket_path"`
+	SocketPath string `toml:"socket_path" json:"socket_path"`
 }
 
 type TUIConfig struct {
-	ShowVolume bool `toml:"show_volume"`
+	ShowVolume bool `toml:"show_volume" json:"show_volume"`
 }
 
 type PriorityEntry struct {

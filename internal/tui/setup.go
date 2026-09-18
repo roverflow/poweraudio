@@ -31,6 +31,7 @@ type SetupModel struct {
 	done       bool
 	frame      int
 	binaryPath string
+	width      int
 
 	serviceInstalled bool
 }
@@ -41,6 +42,7 @@ func NewSetupModel(client *ipc.Client) SetupModel {
 	return SetupModel{
 		client:           client,
 		binaryPath:       bin,
+		width:            defaultWidth,
 		serviceInstalled: serviceFileExists(),
 	}
 }
@@ -92,6 +94,12 @@ func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case tea.WindowSizeMsg:
+		// The screen used to be drawn at a fixed eighty columns, which wrapped
+		// every line of it on a narrower terminal.
+		m.width = msg.Width
+		return m, nil
+
 	case spinTickMsg:
 		if !m.starting {
 			return m, nil
@@ -114,6 +122,7 @@ func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m SetupModel) View() tea.View {
+	w, _ := screenSize(m.width, 1)
 	var b strings.Builder
 
 	b.WriteString("  " + styleTitle.Render("poweraudio"))
@@ -129,7 +138,7 @@ func (m SetupModel) View() tea.View {
 	}
 
 	if m.done {
-		b.WriteString("  " + styleActive.Render("✓ "+m.status))
+		b.WriteString("  " + styleActive.Render(truncate("✓ "+m.status, w-4)))
 		b.WriteString("\n\n")
 		b.WriteString("  " + styleMuted.Render("Opening the interface"))
 		return setupView(b.String())
@@ -141,7 +150,7 @@ func (m SetupModel) View() tea.View {
 	}
 
 	if m.err != nil {
-		b.WriteString("  " + styleError.Render(truncate(m.err.Error(), 76)))
+		b.WriteString("  " + styleError.Render(truncate(m.err.Error(), w-4)))
 		b.WriteString("\n\n")
 	}
 
@@ -152,22 +161,16 @@ func (m SetupModel) View() tea.View {
 	}
 
 	for i, opt := range options {
-		prefix := "  "
-		label := styleNormal.Render(opt.label)
-		if i == m.cursor {
-			prefix = styleAccent.Render("▎") + " "
-			label = styleSelected.Render(opt.label)
-		}
-		b.WriteString(prefix + label)
+		b.WriteString(listRow(w, i == m.cursor, piece(truncate(opt.label, w-4), styleNormal)))
 		b.WriteString("\n")
 		if opt.desc != "" {
-			b.WriteString("    " + styleMuted.Render(opt.desc))
+			b.WriteString("    " + styleMuted.Render(truncate(opt.desc, w-6)))
 			b.WriteString("\n")
 		}
 	}
 
 	b.WriteString("\n")
-	b.WriteString(helpLine(80, "enter select", "j/k move", "q quit"))
+	b.WriteString(helpLine(w, "enter select", "j/k move", "q quit"))
 
 	return setupView(b.String())
 }
@@ -180,9 +183,19 @@ func setupView(s string) tea.View {
 
 func (m SetupModel) startProcess() tea.Cmd {
 	return func() tea.Msg {
+		// A daemon started from here has no journal behind it, and its output
+		// used to go nowhere at all, so a session daemon that failed to switch
+		// left no trace to read afterwards.
+		logPath := daemonLogPath()
+		log, err := openDaemonLog(logPath)
+		if err != nil {
+			return setupResultMsg{err: err}
+		}
+		defer log.Close()
+
 		cmd := exec.Command(m.binaryPath, "--daemon")
-		cmd.Stdout = nil
-		cmd.Stderr = nil
+		cmd.Stdout = log
+		cmd.Stderr = log
 		cmd.Stdin = nil
 		attr := syscallProcAttr()
 		cmd.SysProcAttr = &attr
@@ -196,11 +209,36 @@ func (m SetupModel) startProcess() tea.Cmd {
 		for i := 0; i < 20; i++ {
 			time.Sleep(100 * time.Millisecond)
 			if m.client.Ping() {
-				return setupResultMsg{status: "Daemon started"}
+				return setupResultMsg{status: "Daemon started, logging to " + logPath}
 			}
 		}
-		return setupResultMsg{err: fmt.Errorf("daemon started but never answered on the socket")}
+		return setupResultMsg{err: fmt.Errorf("daemon started but never answered on the socket, see %s", logPath)}
 	}
+}
+
+// openDaemonLog appends to the log so restarts across a session pile up in one
+// file rather than each one wiping the last.
+func openDaemonLog(path string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, fmt.Errorf("creating log dir: %w", err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("opening log: %w", err)
+	}
+	return f, nil
+}
+
+func daemonLogPath() string {
+	return filepath.Join(xdgStateHome(), "poweraudio", "daemon.log")
+}
+
+func xdgStateHome() string {
+	if dir := os.Getenv("XDG_STATE_HOME"); dir != "" {
+		return dir
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "state")
 }
 
 func (m SetupModel) installService() tea.Cmd {
@@ -255,8 +293,8 @@ func spinCmd() tea.Cmd {
 func generateServiceFile(binaryPath string) string {
 	return fmt.Sprintf(`[Unit]
 Description=poweraudio - Audio output controller daemon
-After=pipewire.service wireplumber.service
-Wants=pipewire.service
+After=pipewire.service pipewire-pulse.service wireplumber.service
+Wants=pipewire.service pipewire-pulse.service
 
 [Service]
 Type=simple
@@ -291,7 +329,7 @@ func serviceFileExists() bool {
 	return err == nil
 }
 
-func ServiceEnabled() bool {
+func serviceEnabled() bool {
 	out, err := exec.Command("systemctl", "--user", "is-enabled", "poweraudio").Output()
 	if err != nil {
 		return false

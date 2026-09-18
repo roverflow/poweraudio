@@ -7,6 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/roverflow/poweraudio/internal/audio"
 	"github.com/roverflow/poweraudio/internal/config"
+	"github.com/roverflow/poweraudio/internal/priority"
 )
 
 type configSection int
@@ -23,14 +24,20 @@ const (
 	focusAvailableList
 )
 
-// prioTypeW is the width of the type column on both lists, wide enough for
-// "bluetooth".
-const prioTypeW = 10
+const (
+	// configHeaderRows is the section tabs, a blank, the title, the subtitle
+	// and a blank.
+	configHeaderRows = 5
 
-type PrioritiesModel struct {
+	// switchHeaderRows is the section tabs and a blank.
+	switchHeaderRows = 2
+)
+
+type configModel struct {
 	priorities []config.PriorityEntry
 	devices    []audio.Device
 	switching  config.SwitchingConfig
+	ready      bool
 
 	section      configSection
 	prioFocus    priorityFocus
@@ -40,21 +47,20 @@ type PrioritiesModel struct {
 	offset       int
 	dirty        bool
 	switchDirty  bool
-	err          error
 
 	width  int
 	height int
 }
 
-func NewPrioritiesModel() PrioritiesModel {
-	return PrioritiesModel{width: defaultWidth, height: defaultHeight - chromeLines}
+func newConfigModel() configModel {
+	return configModel{width: defaultWidth, height: defaultHeight - chromeLines}
 }
 
-func (m PrioritiesModel) hasUnsaved() bool {
+func (m configModel) hasUnsaved() bool {
 	return m.dirty || m.switchDirty
 }
 
-func (m PrioritiesModel) Update(msg tea.Msg) (PrioritiesModel, tea.Cmd) {
+func (m configModel) Update(msg tea.Msg) (configModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		var cmd tea.Cmd
@@ -66,74 +72,43 @@ func (m PrioritiesModel) Update(msg tea.Msg) (PrioritiesModel, tea.Cmd) {
 		}
 		m.syncScroll()
 		return m, cmd
-
-	case prioritiesMsg:
-		m.err = msg.err
-		if msg.err != nil {
-			// A failed refresh says nothing about the config. Keep showing
-			// what we last read rather than blanking the screen.
-			return m, nil
-		}
-		m.devices = msg.devices
-		if !m.dirty {
-			m.priorities = msg.priorities
-			m.clampCursors()
-		}
-		if !m.switchDirty {
-			m.switching = msg.switching
-		}
-		m.syncScroll()
-
-	case savePrioritiesResultMsg:
-		m.err = msg.err
-		if msg.err == nil {
-			m.dirty = false
-		}
-
-	case saveSwitchingResultMsg:
-		m.err = msg.err
-		if msg.err == nil {
-			m.switchDirty = false
-		}
 	}
 	return m, nil
 }
 
-func (m PrioritiesModel) handlePriorityInput(msg tea.KeyPressMsg) (PrioritiesModel, tea.Cmd) {
-	available := m.availableDevices()
+// setSnapshot takes the config and the device list from a pushed snapshot.
+// Unsaved edits win over the daemon's copy, so a snapshot arriving mid-edit
+// cannot throw away a reordering that has not been written yet.
+func (m *configModel) setSnapshot(devices []audio.Device, cfg config.Config) {
+	m.devices = devices
+	m.ready = true
+	if !m.dirty {
+		m.priorities = cfg.Priority
+		m.clampCursors()
+	}
+	if !m.switchDirty {
+		m.switching = cfg.Switching
+	}
+	m.syncScroll()
+}
 
+func (m *configModel) saved() {
+	m.dirty = false
+}
+
+func (m *configModel) switchingSaved() {
+	m.switchDirty = false
+}
+
+func (m configModel) handlePriorityInput(msg tea.KeyPressMsg) (configModel, tea.Cmd) {
 	switch msg.String() {
 	case "tab":
 		m.section = sectionSwitching
 		m.switchCursor = 0
 	case "up", "k":
-		if m.prioFocus == focusPriorityList {
-			if m.prioCursor > 0 {
-				m.prioCursor--
-			}
-		} else {
-			if m.availCursor > 0 {
-				m.availCursor--
-			} else {
-				m.prioFocus = focusPriorityList
-				if len(m.priorities) > 0 {
-					m.prioCursor = len(m.priorities) - 1
-				}
-			}
-		}
+		m = m.stepSelection(-1)
 	case "down", "j":
-		if m.prioFocus == focusPriorityList {
-			if m.prioCursor < len(m.priorities)-1 {
-				m.prioCursor++
-			} else if len(available) > 0 {
-				m.prioFocus = focusAvailableList
-				m.availCursor = 0
-			}
-		} else {
-			if m.availCursor < len(available)-1 {
-				m.availCursor++
-			}
-		}
+		m = m.stepSelection(1)
 	case "K", "shift+up":
 		if m.prioFocus == focusPriorityList && m.prioCursor > 0 {
 			m.priorities[m.prioCursor], m.priorities[m.prioCursor-1] = m.priorities[m.prioCursor-1], m.priorities[m.prioCursor]
@@ -147,15 +122,7 @@ func (m PrioritiesModel) handlePriorityInput(msg tea.KeyPressMsg) (PrioritiesMod
 			m.dirty = true
 		}
 	case "enter":
-		if m.prioFocus == focusAvailableList && m.availCursor < len(available) {
-			dev := available[m.availCursor]
-			m.priorities = append(m.priorities, config.PriorityEntry{
-				Match: dev.Name,
-				Type:  strings.ToLower(dev.Type.String()),
-			})
-			m.dirty = true
-			m.clampCursors()
-		}
+		return m.activate()
 	case "x":
 		if m.prioFocus == focusPriorityList && len(m.priorities) > 0 && m.prioCursor < len(m.priorities) {
 			m.priorities = append(m.priorities[:m.prioCursor], m.priorities[m.prioCursor+1:]...)
@@ -170,7 +137,37 @@ func (m PrioritiesModel) handlePriorityInput(msg tea.KeyPressMsg) (PrioritiesMod
 	return m, nil
 }
 
-func (m PrioritiesModel) handleSwitchingInput(msg tea.KeyPressMsg) (PrioritiesModel, tea.Cmd) {
+// activate is enter on either list: adding a device to the ranking from the
+// lower list, or playing through a ranked entry from the upper one.
+func (m configModel) activate() (configModel, tea.Cmd) {
+	if m.prioFocus == focusAvailableList {
+		available := m.availableDevices()
+		if m.availCursor >= len(available) {
+			return m, nil
+		}
+		dev := available[m.availCursor]
+		m.priorities = append(m.priorities, config.PriorityEntry{
+			Match: dev.Name,
+			Type:  strings.ToLower(dev.Type.String()),
+		})
+		m.dirty = true
+		m.clampCursors()
+		return m, nil
+	}
+
+	if m.prioCursor >= len(m.priorities) {
+		return m, nil
+	}
+	entry := m.priorities[m.prioCursor]
+	for _, dev := range m.devices {
+		if priority.Matches(dev, entry) {
+			return m, requestDefaultCmd(dev.ID)
+		}
+	}
+	return m, noticeCmd(noticeWarn, entry.Match+" is not connected")
+}
+
+func (m configModel) handleSwitchingInput(msg tea.KeyPressMsg) (configModel, tea.Cmd) {
 	total := len(connectOptions) + len(disconnectOptions)
 
 	switch msg.String() {
@@ -184,7 +181,7 @@ func (m PrioritiesModel) handleSwitchingInput(msg tea.KeyPressMsg) (PrioritiesMo
 		if m.switchCursor < total-1 {
 			m.switchCursor++
 		}
-	case "enter", " ":
+	case "enter", " ", "space":
 		m.applySwitch(m.switchCursor)
 		m.switchDirty = true
 	case "w":
@@ -195,26 +192,117 @@ func (m PrioritiesModel) handleSwitchingInput(msg tea.KeyPressMsg) (PrioritiesMo
 	return m, nil
 }
 
-func (m PrioritiesModel) View() string {
-	w := m.width
-	if w < minWidth {
-		w = minWidth
-	}
-	h := m.height
-	if h < minContentH {
-		h = minContentH
+// click moves the cursor onto the row under the pointer.
+func (m configModel) click(row int) (configModel, tea.Cmd) {
+	if m.section == sectionSwitching {
+		if idx := m.switchRowIndex(row); idx >= 0 {
+			m.switchCursor = idx
+		}
+		return m, nil
 	}
 
-	tabs := []string{"Priorities", "Switching"}
-	var bar string
-	for i, t := range tabs {
-		if configSection(i) == m.section {
-			bar += styleActiveTab.Render(t)
-		} else {
-			bar += styleTab.Render(t)
-		}
+	flat := row - configHeaderRows
+	if flat < 0 || flat >= m.rowCount() {
+		return m, nil
 	}
-	bar += styleMuted.Render("  tab to swap")
+	kind, idx := m.rowTarget(m.offset + flat)
+	switch kind {
+	case configRowPriority:
+		m.prioFocus, m.prioCursor = focusPriorityList, idx
+	case configRowAvailable:
+		m.prioFocus, m.availCursor = focusAvailableList, idx
+	}
+	m.syncScroll()
+	return m, nil
+}
+
+// scroll moves the cursor down the flat list the two sections share, so the
+// wheel walks the ranking and the available devices in one run.
+func (m configModel) scroll(delta int) (configModel, tea.Cmd) {
+	if m.section == sectionSwitching {
+		total := len(connectOptions) + len(disconnectOptions)
+		m.switchCursor = clampScroll(m.switchCursor+delta, total, 1)
+		return m, nil
+	}
+
+	step := 1
+	if delta < 0 {
+		step = -1
+	}
+	for i := 0; i < abs(delta); i++ {
+		m = m.stepSelection(step)
+	}
+	m.syncScroll()
+	return m, nil
+}
+
+// stepSelection moves one row through the flat list the ranking and the
+// available devices form together, falling off the bottom of one list into the
+// top of the other.
+func (m configModel) stepSelection(dir int) configModel {
+	available := m.availableDevices()
+
+	if dir < 0 {
+		if m.prioFocus == focusPriorityList {
+			if m.prioCursor > 0 {
+				m.prioCursor--
+			}
+			return m
+		}
+		if m.availCursor > 0 {
+			m.availCursor--
+			return m
+		}
+		m.prioFocus = focusPriorityList
+		if len(m.priorities) > 0 {
+			m.prioCursor = len(m.priorities) - 1
+		}
+		return m
+	}
+
+	if m.prioFocus == focusPriorityList {
+		if m.prioCursor < len(m.priorities)-1 {
+			m.prioCursor++
+		} else if len(available) > 0 {
+			m.prioFocus = focusAvailableList
+			m.availCursor = 0
+		}
+		return m
+	}
+	if m.availCursor < len(available)-1 {
+		m.availCursor++
+	}
+	return m
+}
+
+type configRowKind int
+
+const (
+	configRowNone configRowKind = iota
+	configRowPriority
+	configRowAvailable
+)
+
+// rowTarget maps a row of the flat list back onto one of the two lists.
+func (m configModel) rowTarget(flat int) (configRowKind, int) {
+	n := len(m.priorities)
+	if flat < n {
+		return configRowPriority, flat
+	}
+	if n == 0 {
+		n = 1
+	}
+	idx := flat - n - 2
+	if idx >= 0 && idx < len(m.availableDevices()) {
+		return configRowAvailable, idx
+	}
+	return configRowNone, 0
+}
+
+func (m configModel) View() string {
+	w, h := screenSize(m.width, m.height)
+
+	bar := m.sectionBar(w)
 
 	if m.section == sectionSwitching {
 		return m.viewSwitching(w, h, bar)
@@ -222,9 +310,32 @@ func (m PrioritiesModel) View() string {
 	return m.viewPriorities(w, h, bar)
 }
 
-func (m PrioritiesModel) viewPriorities(w, h int, bar string) string {
+// sectionBar draws the two section tabs, and keeps the hint that explains how
+// to swap them only while it fits. The bar overflowing wrapped the header and
+// pushed every row below it down by one.
+func (m configModel) sectionBar(w int) string {
+	const hint = "  tab to swap"
+
+	names := []string{"Priorities", "Switching"}
+	plain := 0
+	var bar string
+	for i, t := range names {
+		plain += runeLen(t) + 4
+		if configSection(i) == m.section {
+			bar += styleActiveTab.Render(t)
+		} else {
+			bar += styleTab.Render(t)
+		}
+	}
+	if plain+runeLen(hint) <= w-1 {
+		bar += styleMuted.Render(hint)
+	}
+	return bar
+}
+
+func (m configModel) viewPriorities(w, h int, bar string) string {
 	visible := m.rowCount()
-	nameW := m.nameWidth()
+	nameW, typeW := configColumns(w)
 
 	title := "  " + styleTitle.Render("Device Priority")
 	if m.dirty {
@@ -238,16 +349,19 @@ func (m PrioritiesModel) viewPriorities(w, h int, bar string) string {
 		bar,
 		"",
 		title,
-		"  " + styleMuted.Render(truncate("Highest first. A green dot marks an entry that is plugged in right now.", w-2)),
+		"  " + styleMuted.Render(truncate("Highest first. A green dot marks an entry that is plugged in right now.", w-3)),
 		"",
 	}
 
 	var rows []string
-	if len(m.priorities) == 0 {
+	switch {
+	case !m.ready:
+		rows = append(rows, "  "+styleMuted.Render("waiting for the daemon"))
+	case len(m.priorities) == 0:
 		rows = append(rows, "  "+styleMuted.Render("nothing yet, pick a device below and press enter"))
-	} else {
+	default:
 		for i, p := range m.priorities {
-			rows = append(rows, m.priorityRow(i, p, nameW))
+			rows = append(rows, m.priorityRow(i, p, w, nameW, typeW))
 		}
 	}
 
@@ -258,57 +372,74 @@ func (m PrioritiesModel) viewPriorities(w, h int, bar string) string {
 		rows = append(rows, "  "+styleMuted.Render("every detected device is already on the list"))
 	} else {
 		for i, dev := range available {
-			rows = append(rows, m.availableRow(i, dev, nameW))
+			rows = append(rows, m.availableRow(i, dev, w, nameW, typeW))
 		}
 	}
 
 	footer := []string{
 		"",
-		helpLine(w, "enter add", "x remove", "J/K reorder", "w save", "tab switching", "? help"),
+		helpLine(w, "enter add/play", "x drop", "J/K order", "w save", "tab rules", "? help", "q quit"),
 	}
 
 	return frame(h, header, window(rows, m.offset, visible), footer)
 }
 
-func (m PrioritiesModel) priorityRow(i int, p config.PriorityEntry, nameW int) string {
+func (m configModel) priorityRow(i int, p config.PriorityEntry, width, nameW, typeW int) string {
 	selected := m.prioFocus == focusPriorityList && i == m.prioCursor
 
-	prefix := "  "
-	if selected {
-		prefix = styleAccent.Render("▎") + " "
-	}
-
-	live := "  "
-	if m.priorityPresent(p) {
-		live = styleActive.Render("●") + " "
-	}
-
-	text := fmt.Sprintf("%2d. ", i+1) + fit(p.Match, nameW) + "  " + fit(p.Type, prioTypeW)
-	if selected {
-		text = styleSelected.Render(text)
+	pieces := []rowPiece{}
+	if priority.Present(p, m.devices) {
+		pieces = append(pieces, keepPiece("●", styleActive, colorSuccess))
 	} else {
-		text = styleNormal.Render(text)
+		pieces = append(pieces, piece(" ", styleNormal))
 	}
-	return prefix + live + text
+	pieces = append(pieces,
+		piece(fmt.Sprintf(" %2d. ", i+1), styleMuted),
+		piece(fit(p.Match, nameW), styleNormal),
+	)
+	if typeW > 0 {
+		pieces = append(pieces, piece("  "+fit(typeLabel(p.Type), typeW), styleMuted))
+	}
+	return listRow(width, selected, pieces...)
 }
 
-func (m PrioritiesModel) availableRow(i int, dev audio.Device, nameW int) string {
+func (m configModel) availableRow(i int, dev audio.Device, width, nameW, typeW int) string {
 	selected := m.prioFocus == focusAvailableList && i == m.availCursor
 
-	prefix := "  "
-	if selected {
-		prefix = styleAccent.Render("▎") + " "
+	// Five blank columns where the ranked rows carry their marker and rank,
+	// so both lists line up in the same columns.
+	pieces := []rowPiece{
+		piece("      ", styleNormal),
+		piece(fit(dev.Name, nameW), styleMuted),
 	}
+	if typeW > 0 {
+		pieces = append(pieces, piece("  "+fit(typeLabel(dev.Type.String()), typeW), styleMuted))
+	}
+	return listRow(width, selected, pieces...)
+}
 
-	// Four spaces where the priority rows carry their rank, so both lists
-	// line up in the same columns.
-	text := "    " + fit(dev.Name, nameW) + "  " + fit(dev.Type.String(), prioTypeW)
-	if selected {
-		text = styleSelected.Render(text)
-	} else {
-		text = styleMuted.Render(text)
+// typeLabel renders a device type the same way on both lists. Config entries
+// store the lowercase form and DeviceType.String returns the title-case one,
+// which used to put "bluetooth" above "Bluetooth" on the same screen.
+func typeLabel(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "any"
 	}
-	return prefix + "  " + text
+	for _, t := range []audio.DeviceType{
+		audio.DeviceTypeSpeaker,
+		audio.DeviceTypeHeadphone,
+		audio.DeviceTypeBluetooth,
+		audio.DeviceTypeHDMI,
+		audio.DeviceTypeUSB,
+		audio.DeviceTypeUnknown,
+	} {
+		if strings.EqualFold(s, t.String()) {
+			return t.String()
+		}
+	}
+	r := []rune(strings.ToLower(s))
+	return strings.ToUpper(string(r[0])) + string(r[1:])
 }
 
 var connectOptions = []struct{ value, label string }{
@@ -322,25 +453,20 @@ var disconnectOptions = []struct{ value, label string }{
 	{"previous", "Fall back to whatever was playing before"},
 }
 
-func (m PrioritiesModel) viewSwitching(w, h int, bar string) string {
+func (m configModel) viewSwitching(w, h int, bar string) string {
 	header := []string{bar, ""}
 
 	radio := func(idx int, on bool, label string) string {
-		prefix := "  "
-		if m.switchCursor == idx {
-			prefix = styleAccent.Render("▎") + " "
-		}
-		mark := styleMuted.Render("( )")
+		mark := "( ) "
+		style := styleMuted
 		if on {
-			mark = styleActive.Render("(•)")
+			mark = "(•) "
+			style = styleActive
 		}
-		text := truncate(label, w-8)
-		if m.switchCursor == idx {
-			text = styleSelected.Render(text)
-		} else {
-			text = styleNormal.Render(text)
-		}
-		return prefix + mark + " " + text
+		return listRow(w, idx == m.switchCursor,
+			keepPiece(mark, style, colorSuccess),
+			piece(truncate(label, w-8), styleNormal),
+		)
 	}
 
 	title := "  " + styleTitle.Render("On Bluetooth Connect")
@@ -357,6 +483,12 @@ func (m PrioritiesModel) viewSwitching(w, h int, bar string) string {
 		body = append(body, radio(i, m.switching.OnConnect == opt.value, opt.label))
 	}
 
+	// The daemon compares ranks, and two unranked devices tie, so priority
+	// mode with an empty ranking is a setting that switches nothing ever.
+	if warning := priorityModeWarning(m.switching.OnConnect, len(m.priorities)); warning != "" {
+		body = append(body, "      "+styleWarn.Render(truncate(warning, w-8)))
+	}
+
 	body = append(body,
 		"",
 		"  "+styleTitle.Render("On Disconnect"),
@@ -369,37 +501,73 @@ func (m PrioritiesModel) viewSwitching(w, h int, bar string) string {
 
 	footer := []string{
 		"",
-		helpLine(w, "enter pick", "w save", "tab priorities", "? help"),
+		helpLine(w, "enter pick", "w save", "tab priorities", "? help", "q quit"),
 	}
 
 	return frame(h, header, body, footer)
 }
 
-// rowCount is the list space left after the section tabs, a blank, the title,
-// the subtitle, a blank, a blank and the help line.
-func (m PrioritiesModel) rowCount() int {
-	if n := m.height - 7; n > 0 {
+func priorityModeWarning(onConnect string, entries int) string {
+	if onConnect == "priority" && entries == 0 {
+		return "needs at least one priority entry, otherwise nothing ever switches"
+	}
+	return ""
+}
+
+// switchRowIndex maps a row of the content area onto a switching option.
+func (m configModel) switchRowIndex(row int) int {
+	row -= switchHeaderRows + 3 // the title, the subtitle and a blank
+	if row < 0 {
+		return -1
+	}
+	if row < len(connectOptions) {
+		return row
+	}
+	// The gap holds the optional warning, a blank, the heading, the subtitle
+	// and a blank, so only a full gap lands on the disconnect options.
+	gap := 4
+	if priorityModeWarning(m.switching.OnConnect, len(m.priorities)) != "" {
+		gap++
+	}
+	idx := row - len(connectOptions) - gap
+	if idx >= 0 && idx < len(disconnectOptions) {
+		return len(connectOptions) + idx
+	}
+	return -1
+}
+
+// rowCount is the list space left after the header and the help line.
+func (m configModel) rowCount() int {
+	_, h := screenSize(m.width, m.height)
+	if n := h - configHeaderRows - 2; n > 0 {
 		return n
 	}
 	return 1
 }
 
-// nameWidth leaves room for the cursor gutter, the live dot, the rank, the gap
-// and the type column.
-func (m PrioritiesModel) nameWidth() int {
-	w := m.width
-	if w < minWidth {
-		w = minWidth
+// configColumns splits the width between the name and the type column, which
+// is the first thing to go on a narrow terminal.
+func configColumns(width int) (nameW, typeW int) {
+	// The row spends six columns on the presence marker and the rank.
+	avail := width - 3 - 6
+
+	typeW = deviceTypeW
+	if avail < typeW+12 {
+		typeW = 0
 	}
-	if n := w - 1 - (2 + 2 + 4 + 2 + prioTypeW); n > 12 {
-		return n
+	nameW = avail - typeW
+	if typeW > 0 {
+		nameW -= 2
 	}
-	return 12
+	if nameW < 1 {
+		nameW = 1
+	}
+	return nameW, typeW
 }
 
 // bodyLen counts the rows viewPriorities builds, so scrolling and the position
 // hint agree with what is on screen.
-func (m PrioritiesModel) bodyLen() int {
+func (m configModel) bodyLen() int {
 	n := len(m.priorities)
 	if n == 0 {
 		n = 1
@@ -413,7 +581,7 @@ func (m PrioritiesModel) bodyLen() int {
 
 // selectedRow maps the two cursors onto the single flat list that bodyLen
 // counts.
-func (m PrioritiesModel) selectedRow() int {
+func (m configModel) selectedRow() int {
 	if m.prioFocus == focusPriorityList {
 		if len(m.priorities) == 0 {
 			return 0
@@ -427,7 +595,7 @@ func (m PrioritiesModel) selectedRow() int {
 	return n + 2 + m.availCursor
 }
 
-func (m *PrioritiesModel) syncScroll() {
+func (m *configModel) syncScroll() {
 	if m.section != sectionPriorities {
 		m.offset = 0
 		return
@@ -435,36 +603,15 @@ func (m *PrioritiesModel) syncScroll() {
 	m.offset = clampOffset(m.offset, m.selectedRow(), m.bodyLen(), m.rowCount())
 }
 
-func (m PrioritiesModel) availableDevices() []audio.Device {
-	var available []audio.Device
-	for _, dev := range m.devices {
-		found := false
-		for _, p := range m.priorities {
-			if strings.EqualFold(p.Match, dev.Name) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			available = append(available, dev)
-		}
-	}
-	return available
+// availableDevices is every device no entry ranks. It goes through the shared
+// matcher, because the UI comparing names exactly disagreed with the daemon's
+// substring match: a hand-written entry switched correctly while the device it
+// matched still sat here as if it were unranked.
+func (m configModel) availableDevices() []audio.Device {
+	return priority.Unranked(m.devices, m.priorities)
 }
 
-// priorityPresent reports whether a configured entry matches a sink that exists
-// right now. It uses the same comparison as availableDevices so the two lists
-// never disagree about a device.
-func (m PrioritiesModel) priorityPresent(p config.PriorityEntry) bool {
-	for _, dev := range m.devices {
-		if strings.EqualFold(p.Match, dev.Name) {
-			return true
-		}
-	}
-	return false
-}
-
-func (m *PrioritiesModel) applySwitch(cursor int) {
+func (m *configModel) applySwitch(cursor int) {
 	if cursor < len(connectOptions) {
 		m.switching.OnConnect = connectOptions[cursor].value
 		return
@@ -474,7 +621,7 @@ func (m *PrioritiesModel) applySwitch(cursor int) {
 	}
 }
 
-func (m *PrioritiesModel) clampCursors() {
+func (m *configModel) clampCursors() {
 	if m.prioCursor >= len(m.priorities) {
 		m.prioCursor = max(0, len(m.priorities)-1)
 	}
@@ -487,37 +634,9 @@ func (m *PrioritiesModel) clampCursors() {
 	}
 }
 
-type prioritiesMsg struct {
-	priorities []config.PriorityEntry
-	devices    []audio.Device
-	switching  config.SwitchingConfig
-	err        error
-}
-
-type savePrioritiesMsg struct {
-	priorities []config.PriorityEntry
-}
-
-type savePrioritiesResultMsg struct {
-	err error
-}
-
-type saveSwitchingMsg struct {
-	switching config.SwitchingConfig
-}
-
-type saveSwitchingResultMsg struct {
-	err error
-}
-
-func savePrioritiesCmd(priorities []config.PriorityEntry) tea.Cmd {
-	return func() tea.Msg {
-		return savePrioritiesMsg{priorities: priorities}
+func abs(n int) int {
+	if n < 0 {
+		return -n
 	}
-}
-
-func saveSwitchingCmd(switching config.SwitchingConfig) tea.Cmd {
-	return func() tea.Msg {
-		return saveSwitchingMsg{switching: switching}
-	}
+	return n
 }

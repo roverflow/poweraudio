@@ -1,18 +1,24 @@
 # poweraudio configuration
 #
 # Lives at ~/.config/poweraudio/config.toml and is written on first run.
-# The daemon reads it at startup. Restart it after editing by hand:
-#   systemctl --user restart poweraudio
+# The daemon reads it at startup and reloads it on its own when the file
+# changes, so editing by hand needs no restart.
 #
 # Saving from the terminal UI rewrites this file from the daemon's in-memory
 # config, which drops any comments you added.
 
 [general]
-# "auto" tries wpctl first, then pactl.
+# Kept for older configs. Every value means the same thing now: the daemon
+# talks to PipeWire and PulseAudio alike through pactl, and reports which one
+# it found on the status screen.
 backend = "auto"
 
-# Accepted but not used yet. The daemon logs at a fixed level to stderr.
+# Lowest level written to stderr (and the journal): debug, info, warn, error.
+# The in-memory event log the UI shows keeps every level regardless.
 log_level = "info"
+
+# Optional. Append the same log lines to this file as well.
+# log_file = "/home/you/.local/state/poweraudio/daemon.log"
 
 [switching]
 # What a Bluetooth device connecting is allowed to do:

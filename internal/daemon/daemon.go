@@ -1,9 +1,13 @@
+// Package daemon is the long-running half of poweraudio. It watches BlueZ and
+// the audio backend, decides where the default output belongs, and serves the
+// state a UI needs over a Unix socket. Everything a client can ask for goes
+// through Handle or Subscribe; the rest of the package is unexported.
 package daemon
 
 import (
 	"context"
 	"fmt"
-	"log"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -13,6 +17,7 @@ import (
 	"github.com/roverflow/poweraudio/internal/bluetooth"
 	"github.com/roverflow/poweraudio/internal/config"
 	"github.com/roverflow/poweraudio/internal/ipc"
+	"github.com/roverflow/poweraudio/internal/priority"
 )
 
 const (
@@ -33,9 +38,14 @@ const (
 	// decides where the output should go instead.
 	disconnectSettle = 300 * time.Millisecond
 
-	// maxEvents is the size of the in-memory log the status screen reads.
+	// maxEvents is the size of the in-memory log the status screen reads. It
+	// keeps every level, so a debug line still costs a slot.
 	maxEvents = 200
 )
+
+// configPollInterval is how often the config file's mtime is checked. It is a
+// variable so tests do not have to wait two seconds for a reload.
+var configPollInterval = 2 * time.Second
 
 // pendingBT is a Bluetooth device that has connected but whose audio sink
 // PipeWire has not published yet.
@@ -71,77 +81,74 @@ type Daemon struct {
 	// output somewhere neither of them chose.
 	switchMu sync.Mutex
 
-	ipcRequests chan IPCRequest
-}
+	// saveMu serializes writes to the config file. Requests are handled on the
+	// connection's own goroutine now, so two clients pressing save at the same
+	// moment would otherwise race over the same temporary file.
+	saveMu sync.Mutex
+	// ownSaveMod is the mtime left by this daemon's last save. The config
+	// watcher compares against it so a save from the UI does not come back as
+	// an external edit and reload the file the daemon just wrote.
+	ownSaveMod time.Time
 
-type IPCRequest struct {
-	Request  Request
-	Response chan Response
+	logMu   sync.Mutex
+	logFile *os.File
+	logPath string
+
+	subMu sync.RWMutex
+	subs  map[*subscriber]struct{}
 }
 
 func New(cfg config.Config, backend audio.Backend, configPath string) *Daemon {
 	return &Daemon{
-		cfg:         cfg,
-		backend:     backend,
-		configPath:  configPath,
-		startTime:   time.Now(),
-		ipcRequests: make(chan IPCRequest, 16),
+		cfg:        cfg,
+		backend:    backend,
+		configPath: configPath,
+		startTime:  time.Now(),
+		subs:       make(map[*subscriber]struct{}),
 	}
 }
 
-func (d *Daemon) IPCChannel() chan<- IPCRequest {
-	return d.ipcRequests
-}
-
+// Run holds the event loop until ctx ends. IPC requests do not come through
+// here: the server calls Handle and Subscribe directly, because serving them
+// from this goroutine meant a held volume key queued behind a sink refresh.
 func (d *Daemon) Run(ctx context.Context) error {
-	d.logEvent("daemon started with %s backend", d.backend.Name())
+	d.setLogFile(d.Config().General.LogFile)
+	defer d.closeLogFile()
+
+	d.infof("daemon started with %s backend", d.backend.Name())
 
 	d.refreshDevices(ctx)
 
 	var btEvents <-chan bluetooth.Event
 	btMon, err := bluetooth.NewMonitor()
 	if err != nil {
-		d.logEvent("bluetooth monitoring unavailable: %v", err)
+		d.warnf("bluetooth monitoring unavailable: %v", err)
 	} else {
 		d.btMonitor = btMon
 		defer btMon.Close()
 		ch, err := btMon.Subscribe(ctx)
 		if err != nil {
-			d.logEvent("bluetooth subscribe failed: %v", err)
+			d.warnf("bluetooth monitoring unavailable: %v", err)
 		} else {
 			btEvents = ch
-			d.logEvent("bluetooth monitoring active")
+			d.infof("bluetooth monitoring active")
 		}
 	}
 
 	audioEvents, err := d.backend.SubscribeEvents(ctx)
 	if err != nil {
-		d.logEvent("audio event subscription failed: %v", err)
+		d.errorf("audio event subscription failed: %v", err)
 	}
 
-	// Device events run on their own goroutine. Handling one means sleeping
-	// for the switch delay and then shelling out several times, and doing that
-	// here left the UI hanging on every Bluetooth connect.
-	go d.runEvents(ctx, btEvents, audioEvents)
+	d.runEvents(ctx, btEvents, audioEvents)
 
-	for {
-		select {
-		case <-ctx.Done():
-			d.logEvent("daemon stopping")
-			return ctx.Err()
-
-		case req, ok := <-d.ipcRequests:
-			if !ok {
-				return nil
-			}
-			d.handleIPC(ctx, req)
-		}
-	}
+	d.infof("daemon stopping")
+	return ctx.Err()
 }
 
 // runEvents owns everything that touches the audio backend on a timer: the
-// Bluetooth handlers, the debounced sink refresh, and the retry that waits for
-// a Bluetooth sink to appear.
+// Bluetooth handlers, the debounced sink refresh, the retry that waits for a
+// Bluetooth sink to appear, and the config file watch.
 func (d *Daemon) runEvents(ctx context.Context, btEvents <-chan bluetooth.Event, audioEvents <-chan audio.Event) {
 	var (
 		settle <-chan time.Time // a burst of sink changes is still arriving
@@ -154,6 +161,10 @@ func (d *Daemon) runEvents(ctx context.Context, btEvents <-chan bluetooth.Event,
 		}
 		return nil
 	}
+
+	poll := time.NewTicker(configPollInterval)
+	defer poll.Stop()
+	lastMod := d.configModTime()
 
 	for {
 		select {
@@ -190,13 +201,63 @@ func (d *Daemon) runEvents(ctx context.Context, btEvents <-chan bluetooth.Event,
 			d.refreshDevices(ctx)
 			d.attemptPending(ctx)
 			retry = armRetry()
+
+		case <-poll.C:
+			lastMod = d.checkConfigFile(lastMod)
 		}
 	}
 }
 
+// checkConfigFile reloads the config when the file changed underneath the
+// daemon, so editing it by hand takes effect without a restart. It returns the
+// mtime to compare against next time.
+func (d *Daemon) checkConfigFile(lastMod time.Time) time.Time {
+	mod := d.configModTime()
+	if mod.IsZero() || mod.Equal(lastMod) {
+		return lastMod
+	}
+
+	d.saveMu.Lock()
+	own := d.ownSaveMod
+	d.saveMu.Unlock()
+	if mod.Equal(own) {
+		return mod
+	}
+
+	path := config.ResolvePath(d.configPath)
+	cfg, err := config.Load(d.configPath)
+	if err != nil {
+		// A half-written or broken file is not a reason to throw away the
+		// settings the daemon is already running with.
+		d.errorf("reloading config from %s: %v", path, err)
+		return mod
+	}
+	d.applyConfig(cfg)
+	d.infof("config reloaded from %s", path)
+	return mod
+}
+
+func (d *Daemon) configModTime() time.Time {
+	info, err := os.Stat(config.ResolvePath(d.configPath))
+	if err != nil {
+		return time.Time{}
+	}
+	return info.ModTime()
+}
+
+// applyConfig swaps in a whole config and tells subscribers. The log file can
+// move with it, so the destination is reopened here rather than only at start.
+func (d *Daemon) applyConfig(cfg config.Config) {
+	d.mu.Lock()
+	d.cfg = cfg
+	d.mu.Unlock()
+	d.setLogFile(cfg.General.LogFile)
+	d.changed()
+}
+
 func (d *Daemon) handleBluetoothEvent(ctx context.Context, ev bluetooth.Event) {
 	if ev.Connected {
-		d.logEvent("bluetooth connected: %s (%s)", ev.DeviceName, ev.MACAddress)
+		d.infof("bluetooth connected: %s (%s)", ev.DeviceName, ev.MACAddress)
 
 		// BlueZ reports the link before PipeWire publishes the sink, so give
 		// it a head start before going to look.
@@ -212,7 +273,7 @@ func (d *Daemon) handleBluetoothEvent(ctx context.Context, ev bluetooth.Event) {
 			return
 		}
 
-		d.logEvent("bluetooth device connected but has no audio sink yet, waiting")
+		d.infof("bluetooth device connected but has no audio sink yet, waiting")
 		d.mu.Lock()
 		d.pending = &pendingBT{
 			mac:    ev.MACAddress,
@@ -223,10 +284,15 @@ func (d *Daemon) handleBluetoothEvent(ctx context.Context, ev bluetooth.Event) {
 		return
 	}
 
-	d.logEvent("bluetooth disconnected: %s (%s)", ev.DeviceName, ev.MACAddress)
+	d.infof("bluetooth disconnected: %s (%s)", ev.DeviceName, ev.MACAddress)
 
 	d.mu.Lock()
-	d.pending = nil
+	// Only the device that is being waited on cancels the wait. Clearing it
+	// for any disconnect meant an unrelated headset going away made the daemon
+	// forget the one that was still trying to arrive.
+	if d.pending != nil && strings.EqualFold(d.pending.mac, ev.MACAddress) {
+		d.pending = nil
+	}
 	wasDefault := d.lastDefaultID
 	d.mu.Unlock()
 
@@ -247,13 +313,15 @@ func (d *Daemon) handleBluetoothEvent(ctx context.Context, ev bluetooth.Event) {
 func (d *Daemon) handleAudioEvent(ctx context.Context, ev audio.Event) {
 	switch ev.Type {
 	case audio.EventSinkAdded:
-		d.logEvent("sink added: %s", ev.DeviceID)
+		before := d.GetDevices()
 		d.refreshDevices(ctx)
+		d.logSinkDiff("sink added", d.GetDevices(), before, ev.DeviceID)
 		d.attemptPending(ctx)
 
 	case audio.EventSinkRemoved:
-		d.logEvent("sink removed: %s", ev.DeviceID)
+		before := d.GetDevices()
 		d.refreshDevices(ctx)
+		d.logSinkDiff("sink removed", before, d.GetDevices(), ev.DeviceID)
 
 	case audio.EventDefaultChanged:
 		d.mu.RLock()
@@ -278,9 +346,36 @@ func (d *Daemon) handleAudioEvent(ctx context.Context, ev audio.Event) {
 			return
 		}
 		name := d.deviceName(current)
-		d.logEvent("default device changed to %s", name)
+		d.infof("default device changed to %s", name)
 		d.notify("Default Device Changed", fmt.Sprintf("Now playing through %s", name))
 	}
+}
+
+// logSinkDiff names the sinks that appeared in one list and not the other. The
+// pactl event carries only the pulse index, which a sink list keyed by name
+// cannot be matched against, so the journal used to fill with lines like
+// "sink added: 1648" that said nothing about which device it was.
+func (d *Daemon) logSinkDiff(what string, have, missing []audio.Device, rawID string) {
+	seen := make(map[string]struct{}, len(missing))
+	for _, dev := range missing {
+		seen[dev.ID] = struct{}{}
+	}
+	var names []string
+	for _, dev := range have {
+		if _, ok := seen[dev.ID]; ok {
+			continue
+		}
+		name := dev.Name
+		if name == "" {
+			name = dev.ID
+		}
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		d.debugf("%s: %s", what, rawID)
+		return
+	}
+	d.debugf("%s: %s", what, strings.Join(names, ", "))
 }
 
 // trySwitchToBT finds the sink belonging to a connected Bluetooth device and
@@ -292,29 +387,44 @@ func (d *Daemon) trySwitchToBT(ctx context.Context, mac, name string) bool {
 	d.switchMu.Lock()
 	defer d.switchMu.Unlock()
 
-	dev := findBTDevice(d.GetDevices(), mac, name)
+	devices := d.GetDevices()
+	dev := findBTDevice(devices, mac, name)
 	if dev == nil {
 		return false
 	}
 
 	if d.switching().OnConnect == "priority" {
-		priorities := d.priorities()
-		if current, err := d.backend.GetDefaultSink(ctx); err == nil && current != nil {
-			if DevicePriority(*dev, priorities) >= DevicePriority(*current, priorities) {
-				d.logEvent("skipping switch: %s has lower priority", dev.Name)
+		// The default is already cached from the last refresh, so asking the
+		// backend again would re-list every sink for an answer we hold.
+		if current := deviceByID(devices, d.defaultID()); current != nil {
+			entries := d.priorities()
+			newRank := priority.Rank(*dev, entries)
+			currentRank := priority.Rank(*current, entries)
+			if newRank >= currentRank {
+				d.warnf("%s", skipReason(*dev, *current, newRank, currentRank, len(entries)))
 				return true
 			}
 		}
 	}
 
-	d.savePrevious(ctx)
+	d.savePrevious()
 	if err := d.setDefault(ctx, dev.ID); err != nil {
-		d.logEvent("switch failed: %v", err)
+		d.errorf("switch failed: %v", err)
 		return true
 	}
-	d.logEvent("switched to %s", dev.Name)
+	d.infof("switched to %s", dev.Name)
 	d.notify("Audio Switched", fmt.Sprintf("Now playing through %s", dev.Name))
 	return true
+}
+
+// skipReason says why a connect did not take the output. "Lower priority" was
+// misleading when neither device was on the list at all, which is the common
+// case for a ranking with one entry in it.
+func skipReason(next, current audio.Device, nextRank, currentRank, entries int) string {
+	if nextRank >= entries && currentRank >= entries {
+		return fmt.Sprintf("skipping switch: neither %s nor %s is on the priority list", next.Name, current.Name)
+	}
+	return fmt.Sprintf("skipping switch: %s is not ranked above %s", next.Name, current.Name)
 }
 
 // fallback picks where the output goes once the device you were listening on
@@ -342,18 +452,18 @@ func (d *Daemon) fallback(ctx context.Context) {
 	// is gone too. Leaving the output wherever the session happened to put it
 	// is the behaviour this daemon exists to avoid.
 	if target == nil {
-		target = FindBestDevice(devices, d.priorities())
+		target = priority.Best(devices, d.priorities())
 	}
 	if target == nil {
-		d.logEvent("no fallback device available")
+		d.warnf("no fallback device available")
 		return
 	}
 
 	if err := d.setDefault(ctx, target.ID); err != nil {
-		d.logEvent("fallback switch failed: %v", err)
+		d.errorf("fallback switch failed: %v", err)
 		return
 	}
-	d.logEvent("fallback to %s", target.Name)
+	d.infof("fallback to %s", target.Name)
 	d.notify("Audio Fallback", fmt.Sprintf("Switched to %s", target.Name))
 }
 
@@ -370,7 +480,7 @@ func (d *Daemon) attemptPending(ctx context.Context) {
 	}
 	if time.Now().After(p.expiry) {
 		d.clearPending(p)
-		d.logEvent("giving up waiting for the audio sink of %s", p.name)
+		d.warnf("giving up waiting for the audio sink of %s", p.name)
 		return
 	}
 	if d.switching().OnConnect == "never" {
@@ -455,7 +565,7 @@ func (d *Daemon) clearPending(p *pendingBT) {
 func (d *Daemon) refreshDevices(ctx context.Context) {
 	devices, err := d.backend.ListSinks(ctx)
 	if err != nil {
-		log.Printf("refresh devices: %v", err)
+		d.errorf("refreshing devices failed: %v", err)
 		return
 	}
 	d.mu.Lock()
@@ -467,26 +577,15 @@ func (d *Daemon) refreshDevices(ctx context.Context) {
 		}
 	}
 	d.mu.Unlock()
+	d.changed()
 }
 
-func (d *Daemon) savePrevious(ctx context.Context) {
-	current, err := d.backend.GetDefaultSink(ctx)
-	if err != nil {
-		return
-	}
+// savePrevious remembers where the output was before a switch, for the
+// previous fallback mode. The cached default is what the last refresh saw, and
+// every caller refreshes first.
+func (d *Daemon) savePrevious() {
 	d.mu.Lock()
-	d.previousID = current.ID
-	d.mu.Unlock()
-}
-
-func (d *Daemon) logEvent(format string, args ...any) {
-	msg := fmt.Sprintf(format, args...)
-	log.Println(msg)
-	d.mu.Lock()
-	d.events = append(d.events, ipc.EventLog{Time: time.Now(), Message: msg})
-	if len(d.events) > maxEvents {
-		d.events = d.events[len(d.events)-maxEvents:]
-	}
+	d.previousID = d.lastDefaultID
 	d.mu.Unlock()
 }
 
@@ -495,17 +594,6 @@ func (d *Daemon) GetDevices() []audio.Device {
 	defer d.mu.RUnlock()
 	out := make([]audio.Device, len(d.devices))
 	copy(out, d.devices)
-	return out
-}
-
-func (d *Daemon) GetEvents(limit int) []ipc.EventLog {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	if limit <= 0 || limit > len(d.events) {
-		limit = len(d.events)
-	}
-	out := make([]ipc.EventLog, limit)
-	copy(out, d.events[len(d.events)-limit:])
 	return out
 }
 
@@ -522,17 +610,11 @@ func (d *Daemon) ConfigPath() string {
 func (d *Daemon) Config() config.Config {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	return d.cfg
-}
-
-func (d *Daemon) UpdatePriorities(priorities []config.PriorityEntry) {
-	d.mu.Lock()
-	d.cfg.Priority = priorities
-	d.mu.Unlock()
+	return copyConfig(d.cfg)
 }
 
 // The event goroutines read config while IPC requests write it, so every read
-// outside handleIPC goes through one of these.
+// outside a locked section goes through one of these.
 
 func (d *Daemon) switching() config.SwitchingConfig {
 	d.mu.RLock()
@@ -554,6 +636,12 @@ func (d *Daemon) priorities() []config.PriorityEntry {
 	return out
 }
 
+func (d *Daemon) defaultID() string {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.lastDefaultID
+}
+
 func (d *Daemon) deviceName(id string) string {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -563,6 +651,15 @@ func (d *Daemon) deviceName(id string) string {
 		}
 	}
 	return id
+}
+
+// copyConfig detaches the priority list, so a caller holding a config cannot
+// see it change underneath as the UI edits the ranking.
+func copyConfig(cfg config.Config) config.Config {
+	out := cfg
+	out.Priority = make([]config.PriorityEntry, len(cfg.Priority))
+	copy(out.Priority, cfg.Priority)
+	return out
 }
 
 // notify raises a desktop notification. The child is waited on in the
@@ -577,6 +674,18 @@ func (d *Daemon) notify(title, body string) {
 		return
 	}
 	go func() { _ = cmd.Wait() }()
+}
+
+func deviceByID(devices []audio.Device, id string) *audio.Device {
+	if id == "" {
+		return nil
+	}
+	for i := range devices {
+		if devices[i].ID == id {
+			return &devices[i]
+		}
+	}
+	return nil
 }
 
 // findBTDevice matches a BlueZ device against the sink list. MAC first, since

@@ -1,4 +1,4 @@
-package daemon
+package priority
 
 import (
 	"testing"
@@ -39,13 +39,13 @@ func TestMatchesPriority(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		if got := matchesPriority(headset, c.prio); got != c.want {
-			t.Errorf("%s: matchesPriority(%+v) = %v, want %v", c.name, c.prio, got, c.want)
+		if got := Matches(headset, c.prio); got != c.want {
+			t.Errorf("%s: Matches(%+v) = %v, want %v", c.name, c.prio, got, c.want)
 		}
 	}
 }
 
-func TestFindBestDevice(t *testing.T) {
+func TestBest(t *testing.T) {
 	devices := []audio.Device{
 		sink("GA104 Digital Stereo (HDMI)", audio.DeviceTypeHDMI),
 		sink("Razer Barracuda X", audio.DeviceTypeUSB),
@@ -58,19 +58,19 @@ func TestFindBestDevice(t *testing.T) {
 		{Match: "Ryzen HD Audio"},
 	}
 
-	got := FindBestDevice(devices, priorities)
+	got := Best(devices, priorities)
 	if got == nil || got.Name != "Razer Barracuda X" {
 		t.Fatalf("picked %v, want the highest ranked device that is present", got)
 	}
 
 	// Nothing on the list is here, so anything beats leaving the output where
 	// the session happened to put it.
-	got = FindBestDevice(devices, []config.PriorityEntry{{Match: "Nothing Like This"}})
+	got = Best(devices, []config.PriorityEntry{{Match: "Nothing Like This"}})
 	if got == nil {
 		t.Fatal("no device picked when the ranking matched nothing")
 	}
 
-	if FindBestDevice(nil, priorities) != nil {
+	if Best(nil, priorities) != nil {
 		t.Error("picked a device from an empty list")
 	}
 }
@@ -82,23 +82,23 @@ func TestFindBestDeviceSkipsUnavailable(t *testing.T) {
 	}
 	priorities := []config.PriorityEntry{{Match: "Razer"}, {Match: "Ryzen"}}
 
-	got := FindBestDevice(devices, priorities)
+	got := Best(devices, priorities)
 	if got == nil || got.ID != "2" {
 		t.Fatalf("picked %v, want the available device", got)
 	}
 }
 
-func TestDevicePriority(t *testing.T) {
+func TestRank(t *testing.T) {
 	priorities := []config.PriorityEntry{{Match: "JBL"}, {Match: "Razer"}}
 
-	if got := DevicePriority(sink("JBL Tune 520BT", audio.DeviceTypeBluetooth), priorities); got != 0 {
+	if got := Rank(sink("JBL Tune 520BT", audio.DeviceTypeBluetooth), priorities); got != 0 {
 		t.Errorf("JBL rank = %d, want 0", got)
 	}
-	if got := DevicePriority(sink("Razer Barracuda X", audio.DeviceTypeUSB), priorities); got != 1 {
+	if got := Rank(sink("Razer Barracuda X", audio.DeviceTypeUSB), priorities); got != 1 {
 		t.Errorf("Razer rank = %d, want 1", got)
 	}
 	// Unlisted devices sort behind everything on the list.
-	if got := DevicePriority(sink("HDMI", audio.DeviceTypeHDMI), priorities); got != len(priorities) {
+	if got := Rank(sink("HDMI", audio.DeviceTypeHDMI), priorities); got != len(priorities) {
 		t.Errorf("unlisted rank = %d, want %d", got, len(priorities))
 	}
 }

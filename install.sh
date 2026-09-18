@@ -92,8 +92,8 @@ install_service() {
         cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=poweraudio - Audio output controller daemon
-After=pipewire.service wireplumber.service
-Wants=pipewire.service
+After=pipewire.service pipewire-pulse.service wireplumber.service
+Wants=pipewire.service pipewire-pulse.service
 
 [Service]
 Type=simple

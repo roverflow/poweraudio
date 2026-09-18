@@ -1,22 +1,20 @@
 package tui
 
 import (
-	"fmt"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/roverflow/poweraudio/internal/config"
 	"github.com/roverflow/poweraudio/internal/ipc"
 )
 
-type Screen int
+type screen int
 
 const (
-	ScreenDevices Screen = iota
-	ScreenPriorities
-	ScreenStatus
-	ScreenHelp
+	screenDevices screen = iota
+	screenConfig
+	screenStatus
+	screenHelp
 )
 
 type noticeKind int
@@ -27,9 +25,19 @@ const (
 	noticeErr
 )
 
-// noticeTTL is how long an action result stays in the status bar before the
-// refresh tick clears it.
-const noticeTTL = 5 * time.Second
+const (
+	// noticeTTL is how long an action result stays in the status bar.
+	noticeTTL = 5 * time.Second
+
+	// tabRows is the tab bar and the blank line under it, which is where the
+	// content area starts for the purposes of a mouse click.
+	tabRows = 2
+
+	// wheelRows is how far one notch scrolls a log. Lists with a cursor move
+	// a single row per notch instead, so the wheel does not throw the
+	// selection clean across the screen.
+	wheelRows = 3
+)
 
 type notice struct {
 	text string
@@ -37,28 +45,41 @@ type notice struct {
 	at   time.Time
 }
 
+// Model is the whole UI. It owns no audio state: every screen is a view over
+// the last snapshot the daemon pushed, and every action is a request back.
 type Model struct {
-	screen     Screen
-	prevScreen Screen
-	devices    DevicesModel
-	priorities PrioritiesModel
-	status     StatusModel
-	client     *ipc.Client
-	width      int
-	height     int
-	connected  bool
+	screen     screen
+	prevScreen screen
 
-	note        notice
-	confirmQuit bool
+	devices devicesModel
+	config  configModel
+	status  statusModel
+	help    helpModel
+
+	client *ipc.Client
+	width  int
+	height int
+
+	// gen is the subscription generation. Messages from an older one are
+	// dropped, which is what keeps a dead connection from being revived by a
+	// retry timer that a manual reconnect already overtook.
+	gen       int
+	sub       <-chan ipc.Snapshot
+	connected bool
+
+	uptimeTicking bool
+	note          notice
+	confirmQuit   bool
 }
 
 func NewModel(client *ipc.Client) Model {
 	m := Model{
-		screen:     ScreenDevices,
-		prevScreen: ScreenDevices,
-		devices:    NewDevicesModel(),
-		priorities: NewPrioritiesModel(),
-		status:     NewStatusModel(),
+		screen:     screenDevices,
+		prevScreen: screenDevices,
+		devices:    newDevicesModel(),
+		config:     newConfigModel(),
+		status:     newStatusModel(),
+		help:       newHelpModel(),
 		client:     client,
 		width:      defaultWidth,
 		height:     defaultHeight,
@@ -68,65 +89,19 @@ func NewModel(client *ipc.Client) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(
-		m.refreshAll(),
-		m.tickCmd(),
-	)
+	return subscribeCmd(m.client, m.gen)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
-		key := msg.String()
-		if key != "q" {
-			m.confirmQuit = false
-		}
+		return m.handleKey(msg)
 
-		switch key {
-		case "ctrl+c":
-			return m, tea.Quit
+	case tea.MouseClickMsg:
+		return m.handleClick(msg.Mouse())
 
-		case "q":
-			// Reordering a priority list and forgetting to press w used to
-			// throw the work away without a word. Ask once.
-			if m.priorities.hasUnsaved() && !m.confirmQuit {
-				m.confirmQuit = true
-				m.setNotice(noticeWarn, "Unsaved config. q again to discard, w to save.")
-				return m, nil
-			}
-			return m, tea.Quit
-
-		case "?":
-			if m.screen == ScreenHelp {
-				m.screen = m.prevScreen
-			} else {
-				m.prevScreen = m.screen
-				m.screen = ScreenHelp
-			}
-			return m, nil
-
-		case "esc":
-			if m.screen == ScreenHelp {
-				m.screen = m.prevScreen
-				return m, nil
-			}
-
-		case "d", "1":
-			m.screen = ScreenDevices
-			return m, nil
-		case "p", "2":
-			m.screen = ScreenPriorities
-			return m, nil
-		case "s", "3":
-			m.screen = ScreenStatus
-			return m, nil
-		case "r":
-			return m, m.refreshAll()
-		}
-
-		if m.screen == ScreenHelp {
-			return m, nil
-		}
+	case tea.MouseWheelMsg:
+		return m.handleWheel(msg.Mouse())
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -134,104 +109,287 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applySize()
 		return m, nil
 
-	case tickMsg:
-		if !m.note.at.IsZero() && time.Since(m.note.at) > noticeTTL {
+	case subReadyMsg:
+		if msg.gen != m.gen {
+			return m, nil
+		}
+		m.sub = msg.ch
+		return m, waitSnapshotCmd(msg.ch, msg.gen)
+
+	case snapshotMsg:
+		if msg.gen != m.gen {
+			return m, nil
+		}
+		m.applySnapshot(msg.snap)
+		return m, waitSnapshotCmd(m.sub, msg.gen)
+
+	case subClosedMsg:
+		return m.dropped(msg.gen)
+
+	case subFailedMsg:
+		return m.dropped(msg.gen)
+
+	case subRetryMsg:
+		if msg.gen != m.gen {
+			return m, nil
+		}
+		return m, subscribeCmd(m.client, m.gen)
+
+	case refreshMsg:
+		if msg.err != nil {
+			m.connected = false
+			return m, m.notify(noticeErr, "Refresh failed: "+msg.err.Error())
+		}
+		m.applySnapshot(*msg.snap)
+		return m, nil
+
+	case noticeMsg:
+		return m, m.notify(msg.kind, msg.text)
+
+	case noticeExpiredMsg:
+		if msg.at.Equal(m.note.at) {
 			m.note = notice{}
 		}
-		return m, tea.Batch(m.refreshAll(), m.tickCmd())
+		return m, nil
+
+	case uptimeTickMsg:
+		// The status screen is the only one that shows a clock, so the tick
+		// stops as soon as you leave it.
+		m.uptimeTicking = m.screen == screenStatus
+		if !m.uptimeTicking {
+			return m, nil
+		}
+		return m, uptimeTickCmd()
 
 	case switchDeviceMsg:
-		return m, m.switchDevice(msg.deviceID)
+		return m, setDefaultCmd(m.client, msg.deviceID)
 
 	case setDefaultMsg:
 		if msg.err != nil {
-			m.setNotice(noticeErr, "Set default failed: "+msg.err.Error())
-		} else {
-			m.setNotice(noticeInfo, "Default output changed")
+			return m, m.notify(noticeErr, "Set default failed: "+msg.err.Error())
 		}
-		return m, m.refreshAll()
+		return m, m.notify(noticeInfo, "Default output changed")
 
 	case volumeMsg:
-		return m, m.setVolume(msg.deviceID, msg.percent)
+		return m, setVolumeCmd(m.client, msg.deviceID, msg.percent)
 
-	case muteMsg:
-		return m, m.toggleMute(msg.deviceID)
+	case volumeTickMsg:
+		var cmd tea.Cmd
+		m.devices, cmd = m.devices.volumeTick(msg.seq)
+		return m, cmd
 
 	case volumeResultMsg:
+		var cmd tea.Cmd
+		m.devices, cmd = m.devices.volumeDone()
 		if msg.err != nil {
-			m.setNotice(noticeErr, "Volume change failed: "+msg.err.Error())
+			return m, tea.Batch(cmd, m.notify(noticeErr, "Volume change failed: "+msg.err.Error()))
 		}
-		return m, m.refreshAll()
+		return m, cmd
+
+	case muteMsg:
+		return m, toggleMuteCmd(m.client, msg.deviceID)
 
 	case muteResultMsg:
 		if msg.err != nil {
-			m.setNotice(noticeErr, "Mute toggle failed: "+msg.err.Error())
+			return m, m.notify(noticeErr, "Mute toggle failed: "+msg.err.Error())
 		}
-		return m, m.refreshAll()
+		return m, nil
 
 	case savePrioritiesMsg:
-		return m, m.savePriorities(msg.priorities)
-
-	case saveSwitchingMsg:
-		return m, m.saveSwitching(msg.switching)
+		return m, updatePrioritiesCmd(m.client, msg.priorities)
 
 	case savePrioritiesResultMsg:
 		if msg.err != nil {
-			m.setNotice(noticeErr, "Save failed: "+msg.err.Error())
-		} else {
-			m.setNotice(noticeInfo, "Priorities saved")
+			return m, m.notify(noticeErr, "Save failed: "+msg.err.Error())
 		}
-		m.priorities, _ = m.priorities.Update(msg)
-		return m, nil
+		m.config.saved()
+		return m, m.notify(noticeInfo, "Priorities saved")
+
+	case saveSwitchingMsg:
+		return m, updateSwitchingCmd(m.client, msg.switching)
 
 	case saveSwitchingResultMsg:
 		if msg.err != nil {
-			m.setNotice(noticeErr, "Save failed: "+msg.err.Error())
-		} else {
-			m.setNotice(noticeInfo, "Switching rules saved")
+			return m, m.notify(noticeErr, "Save failed: "+msg.err.Error())
 		}
-		m.priorities, _ = m.priorities.Update(msg)
-		return m, nil
+		m.config.switchingSaved()
+		return m, m.notify(noticeInfo, "Switching rules saved")
 
-	case refreshResultMsg:
-		m.connected = msg.connected
-		m.devices, _ = m.devices.Update(msg.devices)
-		m.priorities, _ = m.priorities.Update(msg.priorities)
-		m.status, _ = m.status.Update(msg.status)
+	case serviceActionMsg:
+		m.status.checkService(true)
+		if msg.err != nil {
+			return m, m.notify(noticeErr, "Failed: "+msg.err.Error())
+		}
+		return m, m.notify(noticeInfo, msg.status)
+	}
+
+	return m, nil
+}
+
+func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+	if key != "q" {
+		m.confirmQuit = false
+	}
+
+	switch key {
+	case "ctrl+c":
+		return m, tea.Quit
+
+	case "q":
+		// Reordering a priority list and forgetting to press w used to throw
+		// the work away without a word. Ask once.
+		if m.config.hasUnsaved() && !m.confirmQuit {
+			m.confirmQuit = true
+			return m, m.notify(noticeWarn, "Unsaved config. q again to discard, w to save.")
+		}
+		return m, tea.Quit
+
+	case "?":
+		if m.screen == screenHelp {
+			return m.show(m.prevScreen)
+		}
+		m.prevScreen = m.screen
+		return m.show(screenHelp)
+
+	case "esc":
+		if m.screen == screenHelp {
+			return m.show(m.prevScreen)
+		}
+
+	case "d", "1":
+		return m.show(screenDevices)
+	case "c", "2":
+		return m.show(screenConfig)
+	case "s", "3":
+		return m.show(screenStatus)
+
+	case "r":
+		cmds := []tea.Cmd{snapshotOnceCmd(m.client)}
+		if !m.connected {
+			m.gen++
+			cmds = append(cmds, subscribeCmd(m.client, m.gen))
+		}
+		return m, tea.Batch(cmds...)
+	}
+
+	var cmd tea.Cmd
+	switch m.screen {
+	case screenDevices:
+		m.devices, cmd = m.devices.Update(msg)
+	case screenConfig:
+		m.config, cmd = m.config.Update(msg)
+	case screenStatus:
+		m.status, cmd = m.status.Update(msg)
+	case screenHelp:
+		m.help, cmd = m.help.Update(msg)
+	}
+	return m, cmd
+}
+
+// handleClick sends a click on the tab bar to the tabs and anything below it
+// to the active screen, in that screen's own row coordinates.
+func (m Model) handleClick(mouse tea.Mouse) (tea.Model, tea.Cmd) {
+	if mouse.Button != tea.MouseLeft {
+		return m, nil
+	}
+
+	w, h := m.contentSize()
+	if mouse.Y == 0 {
+		if s, ok := tabAt(w, mouse.X); ok {
+			return m.show(s)
+		}
+		return m, nil
+	}
+
+	row := mouse.Y - tabRows
+	if row < 0 || row >= h {
 		return m, nil
 	}
 
 	var cmd tea.Cmd
 	switch m.screen {
-	case ScreenDevices:
-		m.devices, cmd = m.devices.Update(msg)
-	case ScreenPriorities:
-		m.priorities, cmd = m.priorities.Update(msg)
-	case ScreenStatus:
-		m.status, cmd = m.status.Update(msg)
+	case screenDevices:
+		m.devices, cmd = m.devices.click(row)
+	case screenConfig:
+		m.config, cmd = m.config.click(row)
 	}
 	return m, cmd
 }
 
+func (m Model) handleWheel(mouse tea.Mouse) (tea.Model, tea.Cmd) {
+	delta := 0
+	switch mouse.Button {
+	case tea.MouseWheelUp:
+		delta = -1
+	case tea.MouseWheelDown:
+		delta = 1
+	default:
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+	switch m.screen {
+	case screenDevices:
+		m.devices, cmd = m.devices.scroll(delta)
+	case screenConfig:
+		m.config, cmd = m.config.scroll(delta)
+	case screenStatus:
+		m.status, cmd = m.status.scroll(delta * wheelRows)
+	case screenHelp:
+		m.help, cmd = m.help.scroll(delta * wheelRows)
+	}
+	return m, cmd
+}
+
+// show switches screens and starts the uptime clock when the status screen
+// comes up.
+func (m Model) show(s screen) (tea.Model, tea.Cmd) {
+	m.screen = s
+	if s != screenStatus || m.uptimeTicking {
+		return m, nil
+	}
+	m.uptimeTicking = true
+	return m, uptimeTickCmd()
+}
+
+// dropped handles the subscription going away, from either end.
+func (m Model) dropped(gen int) (tea.Model, tea.Cmd) {
+	if gen != m.gen {
+		return m, nil
+	}
+	m.connected = false
+	m.sub = nil
+	m.gen++
+	return m, retrySubscribeCmd(m.gen)
+}
+
+func (m *Model) applySnapshot(snap ipc.Snapshot) {
+	m.connected = true
+	m.devices.setSnapshot(snap.Devices, snap.Config.Priority)
+	m.config.setSnapshot(snap.Devices, snap.Config)
+	m.status.setSnapshot(snap)
+}
+
 func (m Model) View() tea.View {
-	w, h := m.contentSize()
+	w, _ := m.contentSize()
 
 	var content string
 	switch m.screen {
-	case ScreenDevices:
+	case screenDevices:
 		content = m.devices.View()
-	case ScreenPriorities:
-		content = m.priorities.View()
-	case ScreenStatus:
+	case screenConfig:
+		content = m.config.View()
+	case screenStatus:
 		content = m.status.View()
-	case ScreenHelp:
-		content = helpScreen(w, h)
+	case screenHelp:
+		content = m.help.View()
 	}
 
 	// Exactly h lines of content, so the whole frame comes to h+chromeLines
 	// and the status bar always lands on the bottom row.
 	body := strings.Join([]string{
-		m.renderTabs(),
+		m.renderTabs(w),
 		"",
 		content,
 		"",
@@ -240,53 +398,81 @@ func (m Model) View() tea.View {
 
 	v := tea.NewView(body)
 	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
 	return v
 }
 
 // contentSize is the space left for the active screen once the tab bar, the
 // blank lines and the status bar have taken their rows.
 func (m Model) contentSize() (int, int) {
-	w := m.width
-	if w < minWidth {
-		w = minWidth
-	}
-	h := m.height - chromeLines
-	if h < minContentH {
-		h = minContentH
-	}
-	return w, h
+	return screenSize(m.width, m.height-chromeLines)
 }
 
 func (m *Model) applySize() {
 	w, h := m.contentSize()
 
 	m.devices.width, m.devices.height = w, h
-	m.priorities.width, m.priorities.height = w, h
+	m.config.width, m.config.height = w, h
 	m.status.width, m.status.height = w, h
+	m.help.width, m.help.height = w, h
 
 	m.devices.syncScroll()
-	m.priorities.syncScroll()
+	m.config.syncScroll()
 }
 
-func (m *Model) setNotice(kind noticeKind, text string) {
+func (m *Model) notify(kind noticeKind, text string) tea.Cmd {
 	m.note = notice{text: text, kind: kind, at: time.Now()}
+	return noticeExpiryCmd(m.note.at)
 }
 
-func (m Model) renderTabs() string {
-	tabs := []struct {
-		name   string
-		key    string
-		screen Screen
-	}{
-		{"Devices", "d", ScreenDevices},
-		{"Config", "p", ScreenPriorities},
-		{"Status", "s", ScreenStatus},
-	}
+var tabs = []struct {
+	key    string
+	name   string
+	screen screen
+}{
+	{"d", "Devices", screenDevices},
+	{"c", "Config", screenConfig},
+	{"s", "Status", screenStatus},
+}
 
-	parts := make([]string, 0, len(tabs))
-	for _, t := range tabs {
-		label := fmt.Sprintf("%s %s", t.key, t.name)
-		if t.screen == m.screen {
+// tabLabels drops the words on a terminal too narrow for the full bar, since
+// a tab bar that overflows wraps and pushes the frame off by a line.
+func tabLabels(width int) []string {
+	full := make([]string, len(tabs))
+	total := 0
+	for i, t := range tabs {
+		full[i] = t.key + " " + t.name
+		total += runeLen(full[i]) + 4
+	}
+	if total <= width {
+		return full
+	}
+	short := make([]string, len(tabs))
+	for i, t := range tabs {
+		short[i] = t.key
+	}
+	return short
+}
+
+// tabAt is the tab the pointer landed on, taking the two columns of padding
+// each side into account.
+func tabAt(width, x int) (screen, bool) {
+	at := 0
+	for i, label := range tabLabels(width) {
+		end := at + runeLen(label) + 4
+		if x >= at && x < end {
+			return tabs[i].screen, true
+		}
+		at = end
+	}
+	return screenDevices, false
+}
+
+func (m Model) renderTabs(width int) string {
+	labels := tabLabels(width)
+	parts := make([]string, 0, len(labels))
+	for i, label := range labels {
+		if tabs[i].screen == m.screen {
 			parts = append(parts, styleActiveTab.Render(label))
 		} else {
 			parts = append(parts, styleTab.Render(label))
@@ -295,8 +481,9 @@ func (m Model) renderTabs() string {
 	return strings.Join(parts, "")
 }
 
-// renderStatusBar keeps the daemon state on the left and the most recent action
-// result on the right, padded so the two ends sit against the terminal edges.
+// renderStatusBar keeps the daemon state on the left and the most recent
+// action result on the right. The key hints live on each screen's help line
+// instead, so there is only one place to look for them.
 func (m Model) renderStatusBar(width int) string {
 	state, dot := "daemon offline", styleError.Render("●")
 	if m.connected {
@@ -306,9 +493,8 @@ func (m Model) renderStatusBar(width int) string {
 	leftPlain := "  ● " + state
 	left := "  " + dot + styleStatusBar.Render(" "+state)
 
-	rightPlain := "? help  ·  q quit  "
-	right := styleStatusBar.Render(rightPlain)
-
+	rightPlain := ""
+	right := ""
 	if m.note.text != "" {
 		text := truncate(m.note.text, width-runeLen(leftPlain)-4)
 		rightPlain = text + "  "
@@ -327,134 +513,4 @@ func (m Model) renderStatusBar(width int) string {
 		gap = 1
 	}
 	return left + strings.Repeat(" ", gap) + right
-}
-
-// helpScreen is a static key reference. It does not scroll, so it is kept
-// short enough to fit a 24 row terminal.
-func helpScreen(width, height int) string {
-	rows := []struct{ key, desc string }{
-		{"d p s", "devices, config, status"},
-		{"? r q", "help, refresh, quit"},
-		{"", ""},
-		{"Devices", ""},
-		{"j k", "move, also g G pgup pgdn"},
-		{"enter", "make the selected device the default output"},
-		{"h l", "volume down and up in 5% steps"},
-		{"m", "mute or unmute"},
-		{"", ""},
-		{"Config", ""},
-		{"tab", "swap between priorities and switching rules"},
-		{"J K", "reorder the selected priority entry"},
-		{"enter x", "add the highlighted device, drop an entry"},
-		{"w", "write changes to the config file"},
-		{"", ""},
-		{"Status", ""},
-		{"j k", "scroll the event log"},
-		{"i u", "install or remove the systemd user service"},
-	}
-
-	body := make([]string, 0, len(rows))
-	for _, r := range rows {
-		switch {
-		case r.key == "":
-			body = append(body, "")
-		case r.desc == "":
-			body = append(body, "  "+styleSubtitle.Render(r.key))
-		default:
-			body = append(body, "  "+styleKey.Render(fit(r.key, 9))+
-				styleMuted.Render(truncate(r.desc, width-11)))
-		}
-	}
-
-	return frame(height,
-		[]string{"  " + styleTitle.Render("Keys"), ""},
-		body,
-		[]string{"", helpLine(width, "? or esc to close")},
-	)
-}
-
-type refreshResultMsg struct {
-	connected  bool
-	devices    devicesMsg
-	status     statusMsg
-	priorities prioritiesMsg
-}
-
-func (m Model) refreshAll() tea.Cmd {
-	return func() tea.Msg {
-		var result refreshResultMsg
-
-		devices, devErr := m.client.ListDevices()
-		if devErr != nil {
-			result.devices = devicesMsg{err: devErr}
-			result.status = statusMsg{err: devErr}
-			// Carry the error so the config screen keeps showing the last
-			// good list instead of blanking out on a transient hiccup.
-			result.priorities = prioritiesMsg{err: devErr}
-			return result
-		}
-
-		result.connected = true
-		result.devices = devicesMsg{devices: devices}
-
-		status, _ := m.client.GetStatus()
-		events, _ := m.client.GetEvents(50)
-		result.status = statusMsg{status: status, events: events}
-
-		cfg, _ := m.client.GetConfig()
-		if cfg != nil {
-			result.priorities = prioritiesMsg{
-				priorities: cfg.Priority,
-				devices:    devices,
-				switching:  cfg.Switching,
-			}
-		} else {
-			result.priorities = prioritiesMsg{devices: devices}
-		}
-
-		return result
-	}
-}
-
-func (m Model) switchDevice(deviceID string) tea.Cmd {
-	return func() tea.Msg {
-		err := m.client.SetDefault(deviceID)
-		return setDefaultMsg{err: err}
-	}
-}
-
-func (m Model) savePriorities(priorities []config.PriorityEntry) tea.Cmd {
-	return func() tea.Msg {
-		err := m.client.UpdatePriorities(priorities)
-		return savePrioritiesResultMsg{err: err}
-	}
-}
-
-func (m Model) saveSwitching(switching config.SwitchingConfig) tea.Cmd {
-	return func() tea.Msg {
-		err := m.client.UpdateSwitching(switching.OnConnect, switching.OnDisconnect)
-		return saveSwitchingResultMsg{err: err}
-	}
-}
-
-func (m Model) setVolume(deviceID string, percent int) tea.Cmd {
-	return func() tea.Msg {
-		err := m.client.SetVolume(deviceID, percent)
-		return volumeResultMsg{err: err}
-	}
-}
-
-func (m Model) toggleMute(deviceID string) tea.Cmd {
-	return func() tea.Msg {
-		err := m.client.ToggleMute(deviceID)
-		return muteResultMsg{err: err}
-	}
-}
-
-type tickMsg struct{}
-
-func (m Model) tickCmd() tea.Cmd {
-	return tea.Tick(2*time.Second, func(time.Time) tea.Msg {
-		return tickMsg{}
-	})
 }

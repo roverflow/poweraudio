@@ -53,6 +53,27 @@ func (b *stubBackend) SubscribeEvents(context.Context) (<-chan audio.Event, erro
 	return nil, nil
 }
 
+// add appends a sink, which is how a Bluetooth device turning up looks to the
+// daemon.
+func (b *stubBackend) add(dev audio.Device) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.devices = append(b.devices, dev)
+}
+
+// remove drops a sink, which is how a Bluetooth device going away looks.
+func (b *stubBackend) remove(id string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	kept := b.devices[:0]
+	for _, dev := range b.devices {
+		if dev.ID != id {
+			kept = append(kept, dev)
+		}
+	}
+	b.devices = kept
+}
+
 // TestConfigAccessRace drives the reads the event goroutines perform against
 // the writes an IPC request performs. Run under -race this fails if the config
 // is read without the lock, which is what the pending-switch goroutine used
@@ -77,9 +98,11 @@ func TestConfigAccessRace(t *testing.T) {
 				_ = d.priorities()
 				_ = d.Config()
 				_ = d.GetDevices()
+				_ = d.Snapshot()
 				_ = d.hasPending()
 				_ = d.hasDevice("1")
 				_ = d.deviceName("2")
+				_ = d.defaultID()
 			}
 		}()
 	}
@@ -88,8 +111,8 @@ func TestConfigAccessRace(t *testing.T) {
 		go func(n int) {
 			defer wg.Done()
 			for j := 0; j < 200; j++ {
-				d.UpdatePriorities([]config.PriorityEntry{{Match: "JBL"}})
-				d.logEvent("event %d/%d", n, j)
+				d.updatePriorities([]config.PriorityEntry{{Match: "JBL"}})
+				d.infof("event %d/%d", n, j)
 				_ = d.takeOwnSwitch("2")
 			}
 		}(i)
@@ -137,17 +160,15 @@ func TestSwitchesSerialize(t *testing.T) {
 func TestEventLogIsBounded(t *testing.T) {
 	d := New(config.DefaultConfig(), &stubBackend{}, t.TempDir()+"/config.toml")
 	for i := 0; i < maxEvents*3; i++ {
-		d.logEvent("event %d", i)
+		d.infof("event %d", i)
 	}
-	if got := len(d.GetEvents(0)); got != maxEvents {
-		t.Errorf("kept %d events, want %d", got, maxEvents)
+	events := d.Snapshot().Events
+	if len(events) != maxEvents {
+		t.Errorf("kept %d events, want %d", len(events), maxEvents)
 	}
-	if got := len(d.GetEvents(10)); got != 10 {
-		t.Errorf("asked for 10 events, got %d", got)
-	}
-	// The newest entry has to survive; it is the one you look at first.
-	events := d.GetEvents(1)
-	if len(events) != 1 || events[0].Message != "event 599" {
-		t.Errorf("newest event = %v, want the last one logged", events)
+	// Oldest first, so the newest entry is last; it is the one you look at
+	// first on the status screen.
+	if got := events[len(events)-1].Message; got != "event 599" {
+		t.Errorf("newest event = %q, want the last one logged", got)
 	}
 }
