@@ -83,6 +83,13 @@ func TestDetailRowsDescribeTheSelectedDevice(t *testing.T) {
 		}
 	}
 
+	down := snap.Devices[1]
+	down.Available = false
+	rows = detailRows(down, 80, entries, 90)
+	if joined = stripANSI(strings.Join(rows, "\n")); !strings.Contains(joined, "unavailable") {
+		t.Errorf("a sink that cannot play says nothing about it:\n%s", joined)
+	}
+
 	// A device no entry matches says so rather than claiming the bottom rank.
 	unranked := audio.Device{ID: "x", Name: "Webcam Audio", Description: "alsa_output.webcam"}
 	rows = detailRows(unranked, 40, entries, 90)

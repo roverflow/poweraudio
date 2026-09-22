@@ -67,10 +67,11 @@ func Best(devices []audio.Device, entries []config.PriorityEntry) *audio.Device 
 	return nil
 }
 
-// Present reports whether any of devices matches entry.
+// Present reports whether a device that can play matches entry. The green dot
+// uses this, so a sink whose port is not available does not count as plugged in.
 func Present(entry config.PriorityEntry, devices []audio.Device) bool {
 	for _, dev := range devices {
-		if Matches(dev, entry) {
+		if dev.Available && Matches(dev, entry) {
 			return true
 		}
 	}

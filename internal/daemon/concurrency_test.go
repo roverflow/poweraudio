@@ -61,6 +61,31 @@ func (b *stubBackend) add(dev audio.Device) {
 	b.devices = append(b.devices, dev)
 }
 
+// setAvailable flips the port state of a sink that is still listed.
+func (b *stubBackend) setAvailable(id string, available bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for i := range b.devices {
+		if b.devices[i].ID == id {
+			b.devices[i].Available = available
+		}
+	}
+}
+
+// setCurrent is the default PipeWire picks on its own, before the daemon
+// has decided anything.
+func (b *stubBackend) setCurrent(id string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.current = id
+}
+
+func (b *stubBackend) defaultID() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.current
+}
+
 // remove drops a sink, which is how a Bluetooth device going away looks.
 func (b *stubBackend) remove(id string) {
 	b.mu.Lock()

@@ -95,6 +95,185 @@ func TestSinkEventsLogDeviceNames(t *testing.T) {
 	}
 }
 
+func TestRemovingTheDefaultFallsBack(t *testing.T) {
+	backend := rankedSinks(t, "barracuda")
+	d := rankedDaemon(t, backend)
+	ctx := context.Background()
+	d.refreshDevices(ctx)
+
+	backend.remove("barracuda")
+	d.handleAudioEvent(ctx, audio.Event{Type: audio.EventSinkRemoved})
+
+	if got := backend.defaultID(); got != "headset" {
+		t.Errorf("default = %q, want the next ranked device that can play", got)
+	}
+}
+
+func TestUnavailableDefaultFallsBack(t *testing.T) {
+	backend := rankedSinks(t, "barracuda")
+	d := rankedDaemon(t, backend)
+	ctx := context.Background()
+	d.refreshDevices(ctx)
+
+	// A port going empty arrives as a sink change. The event loop collapses
+	// the burst, then makes the same call.
+	backend.setAvailable("barracuda", false)
+	d.refreshSettled(ctx)
+
+	if got := backend.defaultID(); got != "headset" {
+		t.Errorf("default = %q, want the next ranked device that can play", got)
+	}
+}
+
+func TestStartupLeavesAPortThatIsAlreadyDown(t *testing.T) {
+	backend := rankedSinks(t, "barracuda")
+	backend.setAvailable("barracuda", false)
+	d := rankedDaemon(t, backend)
+
+	d.refreshInitial(context.Background())
+
+	if got := backend.defaultID(); got != "headset" {
+		t.Errorf("default = %q, want the next ranked device that can play", got)
+	}
+}
+
+func TestUnknownPortStaysTheDefault(t *testing.T) {
+	// availability unknown is stored as Available. A refresh must not move it.
+	backend := rankedSinks(t, "barracuda")
+	d := rankedDaemon(t, backend)
+	ctx := context.Background()
+	d.refreshDevices(ctx)
+
+	d.refreshSettled(ctx)
+
+	if got := backend.defaultID(); got != "barracuda" {
+		t.Errorf("default = %q, want the dongle left where it was", got)
+	}
+}
+
+func TestRemovingAnotherSinkLeavesTheDefault(t *testing.T) {
+	backend := rankedSinks(t, "ryzen")
+	d := rankedDaemon(t, backend)
+	ctx := context.Background()
+	d.refreshDevices(ctx)
+
+	backend.remove("barracuda")
+	d.handleAudioEvent(ctx, audio.Event{Type: audio.EventSinkRemoved})
+
+	if got := backend.defaultID(); got != "ryzen" {
+		t.Errorf("default = %q, want the device that was already playing", got)
+	}
+}
+
+func TestFallbackAlreadyInPlaceIsQuiet(t *testing.T) {
+	backend := rankedSinks(t, "barracuda")
+	d := rankedDaemon(t, backend)
+	ctx := context.Background()
+	d.refreshDevices(ctx)
+
+	// The sound server has already moved to the device the ranking would pick.
+	backend.remove("barracuda")
+	backend.setCurrent("headset")
+	d.handleAudioEvent(ctx, audio.Event{Type: audio.EventSinkRemoved})
+
+	if got := backend.defaultID(); got != "headset" {
+		t.Errorf("default = %q, want it left on the device the server chose", got)
+	}
+	for _, ev := range d.Snapshot().Events {
+		if strings.Contains(ev.Message, "fallback to") {
+			t.Errorf("announced a switch that had already happened: %q", ev.Message)
+		}
+	}
+}
+
+func TestEarcupsOffFallsBack(t *testing.T) {
+	backend := barracudaSinks(t, "barracuda")
+	d := rankedDaemon(t, backend)
+	ctx := context.Background()
+	d.refreshDevices(ctx)
+
+	d.handleEarcups(ctx, false)
+
+	if got := backend.defaultID(); got != "ryzen" {
+		t.Errorf("default = %q, want the speakers after the earcups powered off", got)
+	}
+	for _, dev := range d.GetDevices() {
+		if dev.ID == "barracuda" && dev.Available {
+			t.Error("the powered-off headset is still available")
+		}
+	}
+}
+
+func TestEarcupsOnTakesTheOutput(t *testing.T) {
+	backend := barracudaSinks(t, "ryzen")
+	d := rankedDaemon(t, backend)
+	ctx := context.Background()
+	d.refreshDevices(ctx)
+
+	d.handleEarcups(ctx, true)
+
+	if got := backend.defaultID(); got != "barracuda" {
+		t.Errorf("default = %q, want the headset after the earcups powered on", got)
+	}
+}
+
+func TestEarcupsOnLeavesTheOutputWhenConnectIsNever(t *testing.T) {
+	backend := barracudaSinks(t, "ryzen")
+	d := rankedDaemon(t, backend)
+	cfg := d.Config()
+	cfg.Switching.OnConnect = "never"
+	d.applyConfig(cfg)
+	ctx := context.Background()
+	d.refreshDevices(ctx)
+
+	d.handleEarcups(ctx, true)
+
+	if got := backend.defaultID(); got != "ryzen" {
+		t.Errorf("default = %q, want it left alone when on_connect is never", got)
+	}
+}
+
+func barracudaSinks(t *testing.T, current string) *stubBackend {
+	t.Helper()
+	return &stubBackend{
+		current: current,
+		devices: []audio.Device{
+			{
+				ID:        "barracuda",
+				Name:      "Razer Barracuda X Analog Stereo",
+				VendorID:  0x1532,
+				ProductID: 0x054e,
+				Available: true,
+			},
+			{ID: "ryzen", Name: "Ryzen HD Audio Controller", Available: true},
+		},
+	}
+}
+
+func rankedSinks(t *testing.T, current string) *stubBackend {
+	t.Helper()
+	return &stubBackend{
+		current: current,
+		devices: []audio.Device{
+			{ID: "barracuda", Name: "Razer Barracuda X", Available: true},
+			{ID: "headset", Name: "Headphones", Available: true},
+			{ID: "ryzen", Name: "Ryzen HD Audio Controller", Available: true},
+		},
+	}
+}
+
+func rankedDaemon(t *testing.T, backend *stubBackend) *Daemon {
+	t.Helper()
+	cfg := config.DefaultConfig()
+	cfg.Notifications.Enabled = false
+	cfg.Priority = []config.PriorityEntry{
+		{Match: "Barracuda"},
+		{Match: "Headphones"},
+		{Match: "Ryzen"},
+	}
+	return New(cfg, backend, filepath.Join(t.TempDir(), "config.toml"))
+}
+
 // Headset A waiting for its sink used to be forgotten the moment unrelated
 // headset B disconnected.
 func TestDisconnectOfAnotherDeviceKeepsPending(t *testing.T) {
@@ -149,7 +328,7 @@ func TestConfigWatchReloadsRewrittenFile(t *testing.T) {
 	}()
 
 	d := New(cfg, &stubBackend{}, path)
-	go d.runEvents(ctx, nil, nil)
+	go d.runEvents(ctx, nil, nil, nil)
 
 	// The watch compares mtimes, so the rewrite has to land after the first
 	// poll has read the original one.

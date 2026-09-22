@@ -416,6 +416,12 @@ func detailRows(dev audio.Device, percent int, entries []config.PriorityEntry, w
 	if dev.IsDefault {
 		def = "yes"
 	}
+	// Shares the default field so the panel stays five rows. A new row would
+	// change devicePanelRows and the point where a short terminal drops the
+	// panel.
+	if !dev.Available {
+		def += "  ·  unavailable"
+	}
 
 	mac := dev.MACAddress
 	if mac == "" {

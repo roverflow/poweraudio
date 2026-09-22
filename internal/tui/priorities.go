@@ -160,7 +160,7 @@ func (m configModel) activate() (configModel, tea.Cmd) {
 	}
 	entry := m.priorities[m.prioCursor]
 	for _, dev := range m.devices {
-		if priority.Matches(dev, entry) {
+		if dev.Available && priority.Matches(dev, entry) {
 			return m, requestDefaultCmd(dev.ID)
 		}
 	}

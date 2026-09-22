@@ -88,6 +88,18 @@ func TestFindBestDeviceSkipsUnavailable(t *testing.T) {
 	}
 }
 
+func TestPresentRequiresTheDeviceCanPlay(t *testing.T) {
+	entry := config.PriorityEntry{Match: "Razer"}
+	down := []audio.Device{{Name: "Razer Barracuda X", Available: false}}
+	if Present(entry, down) {
+		t.Error("a sink whose port is not available counted as present")
+	}
+	up := []audio.Device{{Name: "Razer Barracuda X", Available: true}}
+	if !Present(entry, up) {
+		t.Error("a sink that can play did not count as present")
+	}
+}
+
 func TestRank(t *testing.T) {
 	priorities := []config.PriorityEntry{{Match: "JBL"}, {Match: "Razer"}}
 

@@ -134,6 +134,16 @@ type pactlSink struct {
 	Mute        bool                       `json:"mute"`
 	Volume      map[string]pactlSinkVolume `json:"volume"`
 	Properties  map[string]string          `json:"properties"`
+	// ActivePort is the port sound is routed to. Ports carries whether each
+	// one has something on the other end. Both are empty when the server
+	// omits them.
+	ActivePort string      `json:"active_port"`
+	Ports      []pactlPort `json:"ports"`
+}
+
+type pactlPort struct {
+	Name         string `json:"name"`
+	Availability string `json:"availability"`
 }
 
 type pactlSinkVolume struct {
@@ -174,17 +184,67 @@ func deviceFrom(s pactlSink, defaultName string) Device {
 		Description: s.Name,
 		Type:        classify(s),
 		IsDefault:   s.Name == defaultName,
-		// Every sink pactl lists exists and can be selected. SUSPENDED is just
-		// the resting state of a sink nobody is playing to, so treating it as
-		// unavailable used to hide most of the machine.
-		Available: true,
-		Volume:    channelVolume(s.Volume),
-		Muted:     s.Mute,
+		Available:   sinkAvailable(s),
+		Volume:      channelVolume(s.Volume),
+		Muted:       s.Mute,
 	}
 	if dev.Type == DeviceTypeBluetooth {
 		dev.MACAddress = macAddress(s)
 	}
+	dev.VendorID = parseHexID(s.Properties["device.vendor.id"])
+	dev.ProductID = parseHexID(s.Properties["device.product.id"])
 	return dev
+}
+
+// parseHexID reads pactl's "0x1532". An empty or unreadable value is zero,
+// which means the server did not publish a USB id.
+func parseHexID(s string) uint16 {
+	s = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(s, "0x"), "0X"))
+	if s == "" {
+		return 0
+	}
+	n, err := strconv.ParseUint(s, 16, 16)
+	if err != nil {
+		return 0
+	}
+	return uint16(n)
+}
+
+// sinkAvailable reports whether audio can come out of this sink.
+//
+// pactl keeps a sink for as long as the card is present. SUSPENDED only means
+// nothing is playing, so an idle sink stays available. The port list is what
+// says the far end is gone. The active port is where sound is routed, and
+// "not available" means that port is empty. PipeWire writes that phrase.
+// PulseAudio writes "no". "availability unknown" stays available: a dongle
+// with no jack sense reports unknown the whole time it is plugged in, and
+// treating that as gone would hide the headset while it is on.
+func sinkAvailable(s pactlSink) bool {
+	if s.ActivePort != "" {
+		for _, p := range s.Ports {
+			if p.Name == s.ActivePort {
+				return portAvailable(p.Availability)
+			}
+		}
+	}
+	if len(s.Ports) == 0 {
+		return true
+	}
+	for _, p := range s.Ports {
+		if portAvailable(p.Availability) {
+			return true
+		}
+	}
+	return false
+}
+
+func portAvailable(availability string) bool {
+	switch strings.ToLower(strings.TrimSpace(availability)) {
+	case "no", "not available", "unavailable":
+		return false
+	default:
+		return true
+	}
 }
 
 // classify decides what kind of output a sink is. The PipeWire properties come

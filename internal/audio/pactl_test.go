@@ -137,6 +137,98 @@ func TestDecodeSinks(t *testing.T) {
 	}
 }
 
+func TestDeviceAvailabilityFollowsTheActivePort(t *testing.T) {
+	cases := []struct {
+		name string
+		sink pactlSink
+		want bool
+	}{
+		{
+			name: "no ports",
+			sink: pactlSink{Name: "speakers"},
+			want: true,
+		},
+		{
+			name: "idle sink",
+			sink: pactlSink{State: "SUSPENDED"},
+			want: true,
+		},
+		{
+			// The motherboard card keeps the sink. Line out is where sound
+			// goes, so the empty headphone jack does not take the card away.
+			name: "line out playing, headphone jack empty",
+			sink: pactlSink{
+				ActivePort: "analog-output-lineout",
+				Ports: []pactlPort{
+					{Name: "analog-output-lineout", Availability: "available"},
+					{Name: "analog-output-headphones", Availability: "not available"},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "active port empty",
+			sink: pactlSink{
+				ActivePort: "analog-output-headphones",
+				Ports: []pactlPort{
+					{Name: "analog-output-headphones", Availability: "not available"},
+				},
+			},
+			want: false,
+		},
+		{
+			// PulseAudio writes "no" where PipeWire writes "not available".
+			name: "pulseaudio no",
+			sink: pactlSink{
+				ActivePort: "analog-output",
+				Ports:      []pactlPort{{Name: "analog-output", Availability: "no"}},
+			},
+			want: false,
+		},
+		{
+			// The Barracuda X dongle has no jack sense. It reports unknown
+			// while the earcups are on and while they are off, so unknown
+			// has to stay usable.
+			name: "dongle availability unknown",
+			sink: pactlSink{
+				ActivePort: "analog-output",
+				Ports:      []pactlPort{{Name: "analog-output", Availability: "availability unknown"}},
+			},
+			want: true,
+		},
+		{
+			name: "every port empty and none active",
+			sink: pactlSink{
+				Ports: []pactlPort{{Name: "hdmi-output-0", Availability: "not available"}},
+			},
+			want: false,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := deviceFrom(c.sink, "").Available; got != c.want {
+				t.Errorf("Available = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestParseHexID(t *testing.T) {
+	if got := parseHexID("0x1532"); got != 0x1532 {
+		t.Errorf("parseHexID(0x1532) = %#x", got)
+	}
+	if got := parseHexID("054e"); got != 0x054e {
+		t.Errorf("parseHexID(054e) = %#x", got)
+	}
+	if got := parseHexID(""); got != 0 {
+		t.Errorf("parseHexID empty = %#x", got)
+	}
+	if got := parseHexID("nope"); got != 0 {
+		t.Errorf("parseHexID(nope) = %#x", got)
+	}
+}
+
 func TestDecodeSinksRejectsGarbage(t *testing.T) {
 	if _, err := decodeSinks([]byte("Failure: Connection refused")); err == nil {
 		t.Error("decoding a non-JSON pactl failure should report an error")

@@ -39,9 +39,18 @@ type Device struct {
 	Description string     `json:"description"`
 	Type        DeviceType `json:"type"`
 	IsDefault   bool       `json:"is_default"`
-	Available   bool       `json:"available"`
-	Volume      float64    `json:"volume"`
-	Muted       bool       `json:"muted"`
-	BusPath     string     `json:"bus_path,omitempty"`
-	MACAddress  string     `json:"mac_address,omitempty"`
+	// Available is false when this sink cannot play. That is an active port
+	// marked not available, or a Barracuda X whose earcups are powered off.
+	// An idle sink stays available, and so does a port reported as unknown.
+	// The fallback skips a false value.
+	Available  bool    `json:"available"`
+	Volume     float64 `json:"volume"`
+	Muted      bool    `json:"muted"`
+	BusPath    string  `json:"bus_path,omitempty"`
+	MACAddress string  `json:"mac_address,omitempty"`
+	// VendorID and ProductID are the USB ids pactl reports, such as
+	// 0x1532 and 0x054e for the Barracuda X receiver. Zero means the
+	// server did not say.
+	VendorID  uint16 `json:"vendor_id,omitempty"`
+	ProductID uint16 `json:"product_id,omitempty"`
 }

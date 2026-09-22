@@ -135,17 +135,33 @@ a second headset going away does not cancel the first one's switch.
 Once it finds the sink it runs `pactl set-default-sink <name>`.
 
 Disconnect is the same shape in reverse. The daemon waits 300ms for the sink to
-vanish and re-lists. If the sink that was playing is still there, the device
-that disconnected was not the one you were listening to and nothing moves.
-Otherwise it picks a fallback: either the highest ranked entry in your priority
-list that is present, or the sink that was default before it switched away,
-depending on `on_disconnect`.
+vanish and re-lists. If the sink that was playing is still there and can still
+play, the device that disconnected was not the one you were listening on and
+nothing moves. Otherwise it picks a fallback: either the highest ranked entry
+in your priority list that can play, or the sink that was default before it
+switched away, depending on `on_disconnect`.
+
+A sink can stay listed and still be unable to play. The active port is where
+the audio is going, and pactl marks that port `not available` when nothing is
+plugged into it. The daemon then runs the same fallback it runs when the sink
+disappears. A port marked `availability unknown` stays usable. `SUSPENDED` is
+only an idle sink, and those stay usable too.
+
+The Barracuda X receiver is the exception that reports unknown either way.
+Powering the earcups off does not remove the sound card. The dongle pushes one
+HID report when that changes, report id `02`, and byte 13 is `01` while the
+earcups are on and `00` when they are off. The daemon marks that sink unable
+to play and runs the fallback. It does not repeat the report while the state
+holds, so a daemon that starts with the earcups already off waits for the next
+press. Reading the report needs the udev rule in `configs/70-poweraudio.rules`,
+because the node is root-only without it.
 
 A priority entry matches a device when `match` is a case-insensitive substring
 of the device's name, its technical sink name or its MAC address. If the entry
 also sets `type`, the device's detected type has to equal it. Order in the file
-is the ranking, first is highest. The UI and the daemon share the one matcher,
-so the green dot next to an entry means the daemon would match it too.
+is the ranking, first is highest. The UI and the daemon share the one matcher.
+The green dot also requires that the device can play, so a port that is not
+available leaves the dot off.
 
 Device types come from the properties pactl reports. `device.api` of `bluez5`,
 an `api.bluez5.address`, or a sink name starting with `bluez_` means Bluetooth.
@@ -264,9 +280,9 @@ says so next to the option. `never` leaves the switching to you and keeps the
 daemon around for the event log and the UI.
 
 `on_disconnect` picks the fallback. `priority` walks your ranking top down and
-takes the first device that is present. `previous` returns to whatever was
+takes the first device that can play. `previous` returns to whatever was
 default before the daemon switched away, and falls through to the ranking when
-that device has gone too.
+that device has gone or its port can no longer play.
 
 `switch_delay_ms` is the head start you give PipeWire to register the new sink
 before the daemon goes looking for it. Raise it if your adapter is slow, though

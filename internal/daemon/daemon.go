@@ -18,6 +18,7 @@ import (
 	"github.com/roverflow/poweraudio/internal/config"
 	"github.com/roverflow/poweraudio/internal/ipc"
 	"github.com/roverflow/poweraudio/internal/priority"
+	"github.com/roverflow/poweraudio/internal/razer"
 )
 
 const (
@@ -76,6 +77,13 @@ type Daemon struct {
 	// own switch a second time.
 	ownSwitchID string
 
+	// earcupsKnown is false until the Barracuda dongle pushes a power report.
+	// It does not repeat that report while the state holds, so a daemon that
+	// starts with the earcups already off has nothing to act on yet.
+	// earcupsOn is the last report. Byte 13 of report id 0x02.
+	earcupsKnown bool
+	earcupsOn    bool
+
 	// switchMu serializes the multi-step switch sequences. Each one reads the
 	// sink list, decides, and sets a default; two interleaving would leave the
 	// output somewhere neither of them chose.
@@ -117,7 +125,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	d.infof("daemon started with %s backend", d.backend.Name())
 
-	d.refreshDevices(ctx)
+	d.refreshInitial(ctx)
 
 	var btEvents <-chan bluetooth.Event
 	btMon, err := bluetooth.NewMonitor()
@@ -140,7 +148,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.errorf("audio event subscription failed: %v", err)
 	}
 
-	d.runEvents(ctx, btEvents, audioEvents)
+	d.runEvents(ctx, btEvents, audioEvents, razer.Watch(ctx))
 
 	d.infof("daemon stopping")
 	return ctx.Err()
@@ -149,7 +157,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 // runEvents owns everything that touches the audio backend on a timer: the
 // Bluetooth handlers, the debounced sink refresh, the retry that waits for a
 // Bluetooth sink to appear, and the config file watch.
-func (d *Daemon) runEvents(ctx context.Context, btEvents <-chan bluetooth.Event, audioEvents <-chan audio.Event) {
+func (d *Daemon) runEvents(ctx context.Context, btEvents <-chan bluetooth.Event, audioEvents <-chan audio.Event, linkEvents <-chan razer.Event) {
 	var (
 		settle <-chan time.Time // a burst of sink changes is still arriving
 		retry  <-chan time.Time // a Bluetooth sink has not turned up yet
@@ -195,12 +203,32 @@ func (d *Daemon) runEvents(ctx context.Context, btEvents <-chan bluetooth.Event,
 
 		case <-settle:
 			settle = nil
-			d.refreshDevices(ctx)
+			d.refreshSettled(ctx)
 
 		case <-retry:
-			d.refreshDevices(ctx)
+			d.refreshSettled(ctx)
 			d.attemptPending(ctx)
 			retry = armRetry()
+
+		case ev, ok := <-linkEvents:
+			if !ok {
+				linkEvents = nil
+				continue
+			}
+			if ev.Err != nil {
+				d.warnf("Barracuda earcup watch: %v", ev.Err)
+				continue
+			}
+			if ev.Opened {
+				d.infof("watching Barracuda earcups on %s", ev.Path)
+				continue
+			}
+			if ev.On {
+				d.infof("Barracuda earcups on")
+			} else {
+				d.infof("Barracuda earcups off")
+			}
+			d.handleEarcups(ctx, ev.On)
 
 		case <-poll.C:
 			lastMod = d.checkConfigFile(lastMod)
@@ -264,7 +292,7 @@ func (d *Daemon) handleBluetoothEvent(ctx context.Context, ev bluetooth.Event) {
 		if !sleepCtx(ctx, time.Duration(d.switching().SwitchDelayMs)*time.Millisecond) {
 			return
 		}
-		d.refreshDevices(ctx)
+		d.refreshSettled(ctx)
 
 		if d.switching().OnConnect == "never" {
 			return
@@ -293,34 +321,28 @@ func (d *Daemon) handleBluetoothEvent(ctx context.Context, ev bluetooth.Event) {
 	if d.pending != nil && strings.EqualFold(d.pending.mac, ev.MACAddress) {
 		d.pending = nil
 	}
-	wasDefault := d.lastDefaultID
 	d.mu.Unlock()
 
 	if !sleepCtx(ctx, disconnectSettle) {
 		return
 	}
-	d.refreshDevices(ctx)
-
-	// Only step in when the sink that was playing actually went away.
-	// Disconnecting an idle second headset used to move the output off the
-	// device you were listening on.
-	if d.hasDevice(wasDefault) {
-		return
-	}
-	d.fallback(ctx)
+	// The wait gives the sink time to disappear. refreshSettled then moves
+	// the output only when the sink that was playing has gone or can no
+	// longer play, so an idle second headset disconnecting changes nothing.
+	d.refreshSettled(ctx)
 }
 
 func (d *Daemon) handleAudioEvent(ctx context.Context, ev audio.Event) {
 	switch ev.Type {
 	case audio.EventSinkAdded:
 		before := d.GetDevices()
-		d.refreshDevices(ctx)
+		d.refreshSettled(ctx)
 		d.logSinkDiff("sink added", d.GetDevices(), before, ev.DeviceID)
 		d.attemptPending(ctx)
 
 	case audio.EventSinkRemoved:
 		before := d.GetDevices()
-		d.refreshDevices(ctx)
+		d.refreshSettled(ctx)
 		d.logSinkDiff("sink removed", before, d.GetDevices(), ev.DeviceID)
 
 	case audio.EventDefaultChanged:
@@ -328,7 +350,7 @@ func (d *Daemon) handleAudioEvent(ctx context.Context, ev audio.Event) {
 		previous := d.lastDefaultID
 		d.mu.RUnlock()
 
-		d.refreshDevices(ctx)
+		d.refreshSettled(ctx)
 
 		d.mu.RLock()
 		current := d.lastDefaultID
@@ -378,30 +400,67 @@ func (d *Daemon) logSinkDiff(what string, have, missing []audio.Device, rawID st
 	d.debugf("%s: %s", what, strings.Join(names, ", "))
 }
 
+// handleEarcups records a Barracuda power report and moves the output.
+// Off runs the same fallback as a sink disappearing. On follows on_connect,
+// the same rule as a Bluetooth headset connecting.
+func (d *Daemon) handleEarcups(ctx context.Context, on bool) {
+	d.mu.Lock()
+	d.earcupsKnown = true
+	d.earcupsOn = on
+	d.mu.Unlock()
+
+	d.refreshSettled(ctx)
+	if !on || d.switching().OnConnect == "never" {
+		return
+	}
+	if dev := findBarracuda(d.GetDevices()); dev != nil {
+		d.trySwitchTo(ctx, *dev)
+	}
+}
+
+func findBarracuda(devices []audio.Device) *audio.Device {
+	for i := range devices {
+		if razer.IsBarracuda(devices[i]) {
+			return &devices[i]
+		}
+	}
+	return nil
+}
+
 // trySwitchToBT finds the sink belonging to a connected Bluetooth device and
 // makes it the default, honouring on_connect. It reports whether the sink
 // existed, so callers know whether there is any point waiting longer. A switch
 // declined on priority grounds still counts: the sink is there, the answer is
 // just no.
 func (d *Daemon) trySwitchToBT(ctx context.Context, mac, name string) bool {
-	d.switchMu.Lock()
-	defer d.switchMu.Unlock()
-
-	devices := d.GetDevices()
-	dev := findBTDevice(devices, mac, name)
+	dev := findBTDevice(d.GetDevices(), mac, name)
 	if dev == nil {
 		return false
 	}
+	return d.trySwitchTo(ctx, *dev)
+}
+
+// trySwitchTo makes dev the default, honouring on_connect. A missing device
+// is the caller's problem. A sink that cannot play is refused here so a
+// power-off report cannot be turned around into a switch back onto it.
+func (d *Daemon) trySwitchTo(ctx context.Context, dev audio.Device) bool {
+	d.switchMu.Lock()
+	defer d.switchMu.Unlock()
+
+	if !dev.Available {
+		return false
+	}
+	devices := d.GetDevices()
 
 	if d.switching().OnConnect == "priority" {
 		// The default is already cached from the last refresh, so asking the
 		// backend again would re-list every sink for an answer we hold.
 		if current := deviceByID(devices, d.defaultID()); current != nil {
 			entries := d.priorities()
-			newRank := priority.Rank(*dev, entries)
+			newRank := priority.Rank(dev, entries)
 			currentRank := priority.Rank(*current, entries)
 			if newRank >= currentRank {
-				d.warnf("%s", skipReason(*dev, *current, newRank, currentRank, len(entries)))
+				d.warnf("%s", skipReason(dev, *current, newRank, currentRank, len(entries)))
 				return true
 			}
 		}
@@ -428,7 +487,9 @@ func skipReason(next, current audio.Device, nextRank, currentRank, entries int) 
 }
 
 // fallback picks where the output goes once the device you were listening on
-// has gone away.
+// has gone away or its port can no longer play. It does nothing when the
+// output is already there, so a second report of the same departure does not
+// announce the switch again.
 func (d *Daemon) fallback(ctx context.Context) {
 	d.switchMu.Lock()
 	defer d.switchMu.Unlock()
@@ -456,6 +517,9 @@ func (d *Daemon) fallback(ctx context.Context) {
 	}
 	if target == nil {
 		d.warnf("no fallback device available")
+		return
+	}
+	if target.ID == d.defaultID() {
 		return
 	}
 
@@ -562,6 +626,38 @@ func (d *Daemon) clearPending(p *pendingBT) {
 	d.mu.Unlock()
 }
 
+// refreshInitial loads the sink list at startup and moves off a default
+// that cannot play. refreshSettled is the wrong call here. It compares
+// against the default from before the read, and at startup that is empty,
+// so a port that is already down would be left in place.
+func (d *Daemon) refreshInitial(ctx context.Context) {
+	d.refreshDevices(ctx)
+	d.fallbackIfUnusable(ctx, d.defaultID())
+}
+
+// refreshSettled re-reads the sink list and moves the output off whatever
+// was default when that sink is gone or its port can no longer play.
+// setDefault calls refreshDevices instead. It already holds switchMu, and
+// falling back from inside it would lock that mutex twice.
+func (d *Daemon) refreshSettled(ctx context.Context) {
+	was := d.defaultID()
+	d.refreshDevices(ctx)
+	d.fallbackIfUnusable(ctx, was)
+}
+
+// fallbackIfUnusable runs fallback when id is missing or not available.
+// Callers pass the sink that was playing. One that is still listed and can
+// play is left alone, so some other headset leaving does not move the output.
+func (d *Daemon) fallbackIfUnusable(ctx context.Context, id string) {
+	if id == "" {
+		return
+	}
+	if dev := deviceByID(d.GetDevices(), id); dev != nil && dev.Available {
+		return
+	}
+	d.fallback(ctx)
+}
+
 func (d *Daemon) refreshDevices(ctx context.Context) {
 	devices, err := d.backend.ListSinks(ctx)
 	if err != nil {
@@ -569,6 +665,16 @@ func (d *Daemon) refreshDevices(ctx context.Context) {
 		return
 	}
 	d.mu.Lock()
+	// pactl still lists the Barracuda receiver when the earcups are off.
+	// The link report is the only signal, so a known-off headset is taken
+	// out of the fallback here.
+	if d.earcupsKnown && !d.earcupsOn {
+		for i := range devices {
+			if razer.IsBarracuda(devices[i]) {
+				devices[i].Available = false
+			}
+		}
+	}
 	d.devices = devices
 	for _, dev := range devices {
 		if dev.IsDefault {

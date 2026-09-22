@@ -109,6 +109,37 @@ EOF
     ok "Installed service unit"
 }
 
+install_udev() {
+    local build_dir="$1"
+    local src="${build_dir}/configs/70-poweraudio.rules"
+    local dst="/etc/udev/rules.d/70-poweraudio.rules"
+
+    if [[ ! -f "$src" ]]; then
+        return 0
+    fi
+    if [[ -f "$dst" ]] && cmp -s "$src" "$dst"; then
+        ok "udev rule already installed"
+        return 0
+    fi
+
+    local run=()
+    if [[ "$(id -u)" -eq 0 ]]; then
+        run=()
+    elif sudo -n true 2>/dev/null; then
+        run=(sudo -n)
+    else
+        warn "The Barracuda earcup watcher needs a udev rule. Run:"
+        warn "  sudo install -Dm644 ${src} ${dst}"
+        warn "  sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=hidraw"
+        return 0
+    fi
+
+    "${run[@]}" install -Dm644 "$src" "$dst"
+    "${run[@]}" udevadm control --reload-rules
+    "${run[@]}" udevadm trigger --subsystem-match=hidraw
+    ok "Installed udev rule"
+}
+
 restart_daemon() {
     info "Reloading systemd and restarting service..."
     systemctl --user daemon-reload
@@ -191,6 +222,7 @@ main() {
 
     install_binary "$build_dir"
     install_service "$build_dir"
+    install_udev "$build_dir"
     restart_daemon
 
     local new_ver
