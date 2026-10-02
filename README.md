@@ -1,301 +1,101 @@
 # poweraudio
 
-A daemon, a terminal UI and a small command line tool that move your Linux
-audio output to your Bluetooth headphones when they connect, and put it back
-somewhere sensible when they disconnect.
+poweraudio controls the default audio output on a Linux desktop. When
+Bluetooth headphones connect, it moves the output to the headphones. When they
+disconnect, it moves the output to the highest device on a list that you
+make.
 
-Linux desktops mostly get the first half of that wrong and the second half
-badly. Connect your earbuds and audio keeps playing through the speakers.
-Disconnect them and the session picks whatever sink it likes, which on a lot of
-machines is the HDMI output feeding a monitor with no speakers. poweraudio
-watches BlueZ over D-Bus and switches the default sink itself, using a ranked
-list of devices you set once.
+Without poweraudio, many desktops keep the output on the speakers after the
+headphones connect. After a disconnect, the output often goes to an HDMI
+monitor that has no speakers.
 
-```
-poweraudio                 # terminal UI
-poweraudio daemon          # daemon in the foreground
-poweraudio next            # cycle the output, bind it to a media key
-poweraudio watch           # one line per change, for a status bar
-```
+poweraudio has three parts in one binary:
 
-## Command line
-
-```
-poweraudio [--config PATH] [--version] [--daemon] [<command> [args]]
-```
-
-Without a command poweraudio opens the terminal UI.
-
-| Command | What it does |
-|---------|--------------|
-| `list [--json]` | output devices, one per line, `*` on the default |
-| `status [--json]` | default device, the sound stack it found, config path, uptime, recent events |
-| `set <query> [--notify]` | make a device the default output |
-| `next [--notify]` | switch to the next device that can play, wrapping around |
-| `volume <+N\|-N\|N> [--device Q]` | set or adjust the volume, 0 to 150 percent |
-| `mute [--device Q]` | toggle mute and print the new state |
-| `watch [--json]` | print a line every time the default device or its level changes |
-| `reload` | make the daemon re-read its config file |
-| `daemon` | run the daemon in the foreground, same as `--daemon` |
-| `help` | print the usage text |
-
-A query matches a device id, name, description or MAC address, exactly or as a
-case-insensitive substring. `set razer` is enough when only one device is a
-Razer; `set analog` on a machine with three analog outputs lists all three and
-exits 1. `volume` and `mute` act on the default device unless `--device` says
-otherwise.
-
-`next` passes over the "Dummy Output" placeholder and over virtual sinks, such
-as an EasyEffects chain or a null sink, unless your ranking names one.
-`--notify` asks the daemon for a desktop notification naming the new output,
-which is what you want when `next` is bound to a key and there is no terminal
-to read.
-
-Output is plain text with no colour. Exit codes: 0 on success, 1 when the daemon
-is not running or refused the request, 2 for a bad command line.
-
-```
-$ poweraudio list
-   Razer Barracuda X Analog Stereo           USB      45%  alsa_output.usb-1532_Razer_Barracuda_X-01.analog-stereo
-*  Ryzen HD Audio Controller Analog Stereo   Speaker  53%  alsa_output.pci-0000_0e_00.6.analog-stereo
-
-$ poweraudio watch
-Ryzen HD Audio Controller Analog Stereo  53%
-JBL Tune 520BT  80%
-JBL Tune 520BT  muted
-```
-
-`--daemon` and `--config` work as before. The daemon writes config changes
-back to whichever file it was started with, so `--config` on the unit and
-`--config` on the UI do not have to agree: the UI talks to the daemon, and the
-daemon owns the file.
+- A daemon that monitors the devices and changes the output.
+- A terminal UI to see the devices and edit the list.
+- A command line tool for scripts, status bars and keyboard shortcuts.
 
 ## Requirements
 
-- Linux with PipeWire (with pipewire-pulse, which every desktop install ships)
-  or PulseAudio
-- `pactl` that can print JSON, from PulseAudio 16 or newer or from PipeWire.
-  Ubuntu 22.04's 15.99.1 is new enough
-- BlueZ on the system bus, for the Bluetooth half
-- systemd user session, if you want the daemon to start on login
-- logind on the system bus, so the daemon notices suspend, resume and
-  shutdown, optional
-- a notification server on the session bus for desktop notifications, which
-  every desktop has, optional
-- Go 1.25 or newer to build (`go.mod` pins 1.25.10)
+- Linux with PipeWire and pipewire-pulse, or with PulseAudio.
+- `pactl` from PulseAudio 16 or later, or from PipeWire. Ubuntu 22.04 and
+  later are satisfactory.
+- BlueZ, for Bluetooth headphones.
+- A systemd user session, to start the daemon at login.
+- Go 1.25 or later, to build.
 
-Everything runs as your user. Nothing needs root.
+All parts run as your user. No part needs root access.
 
 ## Install
 
-From a checkout:
+1. Get the source:
+
+   ```bash
+   git clone https://github.com/roverflow/poweraudio.git
+   cd poweraudio
+   ```
+
+2. Build and install the binary and the service file:
+
+   ```bash
+   make install
+   ```
+
+3. Start the service and enable it at login:
+
+   ```bash
+   systemctl --user daemon-reload
+   systemctl --user enable --now poweraudio
+   ```
+
+4. Make sure that the daemon runs:
+
+   ```bash
+   poweraudio status
+   ```
+
+NOTE: The Razer Barracuda X receiver needs a udev rule. `make install` installs
+it if sudo is available without a password. If not, install it manually:
 
 ```bash
-git clone https://github.com/roverflow/poweraudio.git
-cd poweraudio
-make install
+sudo install -Dm644 configs/70-poweraudio.rules /etc/udev/rules.d/70-poweraudio.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=hidraw
 ```
 
-That builds the binary into `~/.local/bin/poweraudio` and drops a unit file at
-`~/.config/systemd/user/poweraudio.service`. Then:
+## Use
 
-```bash
-systemctl --user daemon-reload
-systemctl --user enable --now poweraudio
-```
+Run `poweraudio` without a command to open the terminal UI. Press `?` in the UI
+to see all keys.
 
-`install.sh` does the same thing plus a version check and a post-install
-health check. `make build` alone just produces `./poweraudio` in the checkout.
+| Command | Function |
+|---------|----------|
+| `list [--json]` | Shows the output devices. A `*` marks the default. |
+| `status [--json]` | Shows the default device, the sound system, uptime and recent events. |
+| `set <query> [--notify]` | Makes a device the default output. |
+| `next [--notify]` | Changes to the next device that can play. |
+| `volume <+N\|-N\|N> [--device Q]` | Sets the volume, from 0 to 150 percent. |
+| `mute [--device Q]` | Mutes or unmutes a device. |
+| `watch [--json]` | Shows one line for each change, for a status bar. |
+| `reload` | Makes the daemon read the configuration file again. |
+| `daemon` | Runs the daemon in the foreground. |
 
-You can skip all of it and run `poweraudio`. If nothing is listening on the
-socket, the first screen offers to start a daemon for this session or install
-the user service, and gets out of the way once one is up. A daemon started for
-the session logs to `~/.local/state/poweraudio/daemon.log`.
+A query is part of the device name, sink name or MAC address. Case is not
+important. An exact match has priority. If a query matches more than one
+device, the command stops and shows the matches.
 
-## Removing it
+Use `--notify` when you bind `next` or `set` to a key. The daemon then shows a
+desktop notification with the new output.
 
-```bash
-./uninstall.sh          # binary, unit file, socket, stray daemons
-./uninstall.sh --purge  # the above plus ~/.config/poweraudio
-```
-
-`make uninstall` and `make purge` do the same from a checkout.
-
-## How switching works
-
-Worth reading once, because it explains every delay you will notice.
-
-BlueZ publishes a `PropertiesChanged` signal on the system bus whenever a
-device's `Connected` property flips. The daemon subscribes under the
-`/org/bluez` path namespace, pulls the MAC out of the object path
-(`/org/bluez/hci0/dev_3C_B0_ED_3A_2C_42`) and reads the device's properties in
-one call: the alias for a human name and the list of profiles it offers. A
-device with no audio output profile, such as a mouse or a keyboard, gets a
-debug line and nothing else, so one waking from idle cannot get in the way of
-a headset's switch.
-
-Bluetooth connecting is not the same event as an audio sink appearing.
-PipeWire creates the `bluez_output.*` sink some time after BlueZ reports the
-link, so the daemon waits `switch_delay_ms` (500 by default), re-lists sinks,
-and looks for one whose MAC matches or whose name contains the BlueZ alias. If
-the sink still is not there, the event is parked and retried every 500ms until
-15 seconds have passed. The timer is only a safety net: `pactl subscribe`
-reports the sink appearing, and that event triggers the switch directly, so a
-slow adapter usually lands the moment its sink shows up rather than on the next
-tick. Every parked device has its own slot, and it is only forgotten when that
-same device disconnects, so a second headset going away does not cancel the
-first one's switch.
-
-Once it finds the sink it runs `pactl set-default-sink <name>`. WirePlumber
-often gets there first, because it remembers a headset you have used and
-restores it the moment its sink appears. The daemon then leaves the output
-where it is and still records where it was before, for
-`on_disconnect = "previous"`.
-
-Disconnect is the same shape in reverse. The daemon waits 300ms for the sink to
-vanish and re-lists. If the sink that was playing is still there and can still
-play, the device that disconnected was not the one you were listening on and
-nothing moves. Otherwise it picks a fallback: either the highest ranked entry
-in your priority list that can play, or the sink that was default before it
-switched away, depending on `on_disconnect`.
-
-A sink can stay listed and still be unable to play. The active port is where
-the audio is going, and pactl marks that port `not available` when nothing is
-plugged into it. The daemon then runs the same fallback it runs when the sink
-disappears. A port marked `availability unknown` stays usable. `SUSPENDED` is
-only an idle sink, and those stay usable too. If something else moves the
-output onto a sink that cannot play, the daemon moves it off again. WirePlumber
-does this after a resume, when it restores a device from its own history.
-
-The "Dummy Output" placeholder, which both servers show when no real output is
-left, is never a fallback. PipeWire refuses to make it the default anyway. When
-nothing else can play, the daemon logs `no output left to fall back to`, once
-per outage, and moves to the first real sink that comes back. Virtual sinks are only a
-fallback when your ranking names them, since audio sent to one goes nowhere on
-its own.
-
-Sinks do not arrive all at once. At login WirePlumber publishes sound cards
-one at a time over a second or more, and after a resume USB, HDMI and
-Bluetooth outputs come back in any order. Falling back in the middle of that
-picks whatever happens to be there first, which on a desk with a monitor
-attached is the HDMI output. So the daemon holds off. It makes no fallback
-decision until the sink list has been quiet for 1.5 seconds after startup, or
-2 seconds after a resume, and waits no longer than 10 and 15 seconds. When the
-hold ends it checks the default once and moves only if that default cannot
-play. A Bluetooth headset connecting during a hold still takes the output. The
-daemon hears from logind's `PrepareForSleep` and `PrepareForShutdown` signals
-and makes no switches at all while the machine goes to sleep or shuts down.
-Shutdown needs it too, because GNOME closes your login session first, which
-takes the session's access to the sound cards away while the daemon is still
-running. A cancelled shutdown ends the hold the same way a resume does.
-
-`pactl subscribe` ends whenever the sound server restarts, which is the usual
-fix for Bluetooth trouble. The daemon starts it again, waiting a second and
-doubling up to thirty while the server is down, logs `audio event stream
-reconnected` once events flow, and holds the same way it does at startup while
-the sinks come back.
-
-The Barracuda X receiver is the exception that reports unknown either way.
-Powering the earcups off does not remove the sound card. The dongle pushes one
-HID report when that changes, report id `02`, and byte 13 is `01` while the
-earcups are on and `00` when they are off. The daemon marks that sink unable
-to play and runs the fallback. It does not repeat the report while the state
-holds, so a daemon that starts with the earcups already off waits for the next
-press. Reading the report needs the udev rule in `configs/70-poweraudio.rules`,
-because the node is root-only without it. Right after boot the node can stay
-root-only for a second or two, until your login session is active, so failures
-in the first 30 seconds are debug lines rather than warnings.
-
-A priority entry matches a device when `match` is a case-insensitive substring
-of the device's name, its technical sink name or its MAC address. If the entry
-also sets `type`, the device's detected type has to equal it. Order in the file
-is the ranking, first is highest. The UI and the daemon share the one matcher.
-The green dot also requires that the device can play, so a port that is not
-available leaves the dot off.
-
-Device types come from the properties pactl reports. `device.api` of `bluez5`,
-an `api.bluez5.address`, or a sink name starting with `bluez_` means Bluetooth.
-`device.form.factor` of `headphone` or `headset` means Headphone, `device.bus`
-of `usb` means USB, a name containing `hdmi` or `displayport` means HDMI, and
-anything left is Speaker. Plain PulseAudio publishes fewer of those properties,
-so the names get a second look before a device is called a speaker.
-
-## Keys
-
-Anywhere:
-
-| Key | Action |
-|-----|--------|
-| `d` `c` `s` | devices, config, status (or `1` `2` `3`) |
-| `?` | toggle the key reference, `esc` closes it |
-| `r` | refresh, and reconnect if the daemon went away |
-| `q` | quit, asks once if the config screen has unsaved edits |
-| `ctrl+c` | quit without asking |
-| mouse | click a tab or a row, wheel scrolls the list under the pointer |
-
-Devices:
-
-| Key | Action |
-|-----|--------|
-| `j` `k` | move, also `g` `G` `pgup` `pgdn` |
-| `enter` | make the selected device the default output, also a second click on it |
-| `h` `l` | volume down and up in 5% steps, 0 to 150 |
-| `H` `L` | volume in 1% steps |
-| `m` | mute or unmute |
-
-The panel under the list shows the selected device's technical sink name, MAC,
-volume, and where it sits on the priority list. It disappears first when the
-terminal is short.
-
-Config, priorities section:
-
-| Key | Action |
-|-----|--------|
-| `tab` | swap to the switching rules |
-| `j` `k` | move, falling off the bottom of the ranked list enters the device list below it |
-| `J` `K` | move the selected entry up or down the ranking |
-| `enter` | add the highlighted device to the ranking, or play through the selected entry |
-| `x` | drop the selected entry |
-| `w` | write to the config file |
-
-Config, switching section:
-
-| Key | Action |
-|-----|--------|
-| `tab` | swap back to priorities |
-| `j` `k` | move |
-| `enter` or `space` | pick the option under the cursor |
-| `w` | write to the config file |
-
-Status:
-
-| Key | Action |
-|-----|--------|
-| `j` `k` | scroll the event log, `g` jumps to newest |
-| `i` | write and enable the systemd user unit, shown only when it is not installed |
-| `u` | stop, disable and delete it, shown only when it is |
-
-Edits on the config screen are not saved until you press `w`. A yellow
-`unsaved` marker sits next to the heading until you do, and `q` asks once
-before throwing the work away. A failed write shows up as an error in the
-status bar, not as a silent success.
-
-The UI does not poll. It holds one connection to the daemon, which pushes a
-fresh snapshot every time a device, the log or the config changes, so a switch
-shows up the moment it happens. If the daemon goes away the status bar reads
-`daemon offline` and the UI reconnects on its own once it is back.
+Exit codes: 0 is success, 2 is an incorrect command line, and 1 is all other
+errors. For example, the daemon does not run or no device matches.
 
 ## Configuration
 
-`~/.config/poweraudio/config.toml`, created on first run. Honours
-`XDG_CONFIG_HOME`.
+The configuration file is `~/.config/poweraudio/config.toml`. The daemon makes
+it at the first start. The daemon reads the file again within two seconds of a
+change.
 
 ```toml
-[general]
-backend = "auto"            # kept for older files, every value means pactl
-log_level = "info"          # debug, info, warn, error
-# log_file = "/home/you/.local/state/poweraudio/daemon.log"
-
 [switching]
 on_connect = "always"       # always, priority, never
 on_disconnect = "priority"  # priority, previous
@@ -305,9 +105,6 @@ switch_delay_ms = 500
 enabled = true
 on_device_change = true
 
-[daemon]
-socket_path = "/run/user/1000/poweraudio.sock"
-
 [[priority]]
 match = "JBL Tune 520BT"
 type = "bluetooth"
@@ -316,145 +113,60 @@ type = "bluetooth"
 match = "Built-in Audio Analog Stereo"
 ```
 
-The daemon reloads the file on its own when it changes on disk, checking the
-modification time every two seconds, so editing by hand needs no restart. A
-file that fails to parse is logged and ignored, and the running config stays.
-`poweraudio reload` forces a read right away.
+| Setting | Function |
+|---------|----------|
+| `on_connect` | `always` moves the output to each Bluetooth device that connects. `priority` moves it only if the new device is higher on the list. `never` does not move it. |
+| `on_disconnect` | `priority` moves the output to the highest device on the list that can play. `previous` moves it back to the device before the headphones. |
+| `switch_delay_ms` | Time in milliseconds to wait for PipeWire to make the headphone output after the connection. |
+| `notifications.enabled` | Turns desktop notifications on or off. |
+| `notifications.on_device_change` | Shows a notification when a different program changes the output. |
+| `[[priority]]` | The device list. The first entry has the highest priority. `match` is part of the device name, sink name or MAC address. `type` is optional. |
 
-`on_connect` decides what a Bluetooth device connecting is allowed to do.
-`always` takes the output every time. `priority` only takes it when the new
-device outranks whatever is playing, so plugging in earbuds while your USB
-headset is on the list above them changes nothing. Two devices that are both
-off the list tie, so `priority` with an empty ranking never switches; the UI
-says so next to the option. `never` leaves the switching to you and keeps the
-daemon around for the event log and the UI.
+You can also edit the list in the UI, on the config screen.
 
-`on_disconnect` picks the fallback. `priority` walks your ranking top down and
-takes the first device that can play. `previous` returns to whatever was
-default before the daemon switched away, and falls through to the ranking when
-that device has gone or its port can no longer play.
+NOTE: When you save from the UI, the daemon writes the full file again. The
+daemon does not keep comments that you added. To keep comments, edit the file
+in a text editor.
 
-`switch_delay_ms` is the head start you give PipeWire to register the new sink
-before the daemon goes looking for it. Raise it if your adapter is slow, though
-the retries cover most of that already.
+## Operation
 
-`notifications.enabled` turns desktop notifications on or off. The daemon sends
-them straight to the desktop's notification server over D-Bus. Each one
-replaces the last instead of stacking, a burst of switches within 300
-milliseconds shows up as one notification naming where the output ended up,
-and they are marked transient so they stay out of the notification history.
-Nothing is shown during the startup hold, while the machine sleeps, or for the
-Dummy Output placeholder, and nothing is sent before the desktop's
-notification server is running. After a resume you get one notification, and
-only if the output ended up somewhere other than where it was. A switch you
-make with poweraudio itself is quiet unless you pass `--notify`.
-`on_device_change` covers changes made outside poweraudio, such as from the
-desktop's sound settings.
+On a connection, the daemon waits for PipeWire to make the headphone output.
+Then it makes that output the default. It ignores Bluetooth devices that have
+no audio output, for example a mouse or a keyboard.
 
-`log_level` is the lowest level written to stderr, which systemd captures. The
-in-memory log the UI shows keeps every level regardless. `log_file` appends the
-same lines to a file, useful for a daemon that was not started by systemd.
+On a disconnect, the daemon moves the output only if the current output cannot
+play. A device cannot play if it is gone, if its port has nothing connected,
+or if it is a Barracuda X with the earcups off. The daemon never selects
+"Dummy Output". It selects a virtual sink only if the list includes it.
 
-`socket_path` defaults to `$XDG_RUNTIME_DIR/poweraudio.sock`. The socket is
-created with mode 0600.
+At startup, after a resume and during a shutdown, devices go and come back
+over some seconds. During these periods the daemon does not move the output to
+a fallback device. Headphones that connect still get the output. After startup
+or resume, the daemon checks the output one time when the devices are stable.
 
-`tui.show_volume` exists in the file and does nothing. The UI always draws
-volume bars.
-
-Pressing `w` in the UI rewrites the whole file from the daemon's in-memory
-config, so comments you added by hand do not survive. Edit the file directly if
-you want to keep them; the daemon picks the change up within two seconds.
-
-## Reading the logs
-
-The daemon keeps its last 200 events in memory. The status screen shows them
-newest first with a date, coloured by level: debug lines are dimmed, warnings
-are amber, failures are red. Sinks appearing and going away are debug lines
-and name the device rather than a number. `poweraudio status` prints the last
-ten from a shell.
-
-The status screen and `poweraudio status` name the sound stack the daemon
-found, such as `PipeWire 1.6.9, WirePlumber 0.5.17`, and the engine making the
-switching decisions. Anything the check could not do, such as a pactl too old
-to print JSON, shows up there as a warning.
-
-`skipping switch: X is not ranked above Y` means `on_connect` is set to
-`priority` and your ranking said no. `giving up waiting for the audio sink of
-X` means BlueZ connected but PipeWire never produced a sink, which is usually a
-codec or profile problem rather than anything poweraudio can fix.
-
-The same lines go to stderr, so `journalctl --user -u poweraudio -f` works when
-the UI is not running.
-
-## How it is put together
-
-One binary, three faces.
-
-`poweraudio daemon` runs the event loop. It holds a D-Bus subscription for
-BlueZ property changes, a `pactl subscribe` pipe for sink and default-device
-changes, a two second check on the config file's modification time, and a Unix
-socket serving newline-delimited JSON requests. It shells out to `pactl` rather
-than linking against anything, so there is no cgo and no libpipewire version
-to match. Listing sinks costs one small JSON document per refresh; the previous
-backend parsed the entire PipeWire object graph, about half a megabyte, to find
-four sinks. A change of default reads only the default's name, and the UI is
-only sent a snapshot when the sink list actually changed.
-
-The daemon decides nothing about switching itself. It tells a switching engine
-what happened, a headset connecting or a sink going away, and the engine
-decides. Today there is one engine, which makes every decision and drives
-`pactl`. It is what runs on PulseAudio, on WirePlumber 0.4 and on anything the
-startup check does not recognise. That check asks `pactl info`, the server's
-client list and WirePlumber's settings metadata which sound server, session
-manager and settings this machine has, about 15 milliseconds in all.
-
-Without arguments you get the UI, built on Bubble Tea. It owns no audio state.
-It opens one `subscribe` connection and the daemon pushes a snapshot of
-devices, status, events and config after every change, coalesced so a burst of
-changes is one redraw. Every action is a request back. Which means the UI can
-come and go, and a daemon with no UI attached behaves identically.
-
-With a command you get the CLI, which is one snapshot in and at most one
-request out, printed plainly.
-
-```
-internal/audio       one pactl backend behind the Backend interface
-internal/bluetooth   BlueZ D-Bus subscription
-internal/power       suspend, resume and shutdown, from logind
-internal/probe       which sound server, session manager and settings are present
-internal/notify      desktop notifications over D-Bus
-internal/priority    the matcher the daemon and the UI share
-internal/daemon      event loop, holds, switching engine, IPC server, subscriptions
-internal/ipc         wire protocol and client
-internal/tui         Bubble Tea screens
-internal/cli         subcommands
-internal/config      TOML load and save
-```
+Notifications replace the previous notification. The daemon does not show
+notifications at login or while the computer sleeps.
 
 ## Troubleshooting
 
-**The UI says the daemon is offline.** Check `systemctl --user status
-poweraudio`. If the unit is not installed, press `i` on the status screen. The
-UI reconnects on its own once a daemon answers.
+| Symptom | Possible cause | Action |
+|---------|----------------|--------|
+| The UI shows `daemon offline`. | The service does not run. | Run `systemctl --user status poweraudio`. Press `i` on the status screen to install the service. |
+| The output does not change when the headphones connect. | `bluetoothd` does not run, or PipeWire did not make an output. | Run `poweraudio status` and look for `bluetooth connected`. Run `pactl list sinks short` to see the outputs. |
+| The log shows `giving up waiting for the audio sink`. | PipeWire did not make an output in 15 seconds. | Examine the Bluetooth profile and codec of the headphones. |
+| The output goes to an incorrect device after a disconnect. | The list is empty, or no device on the list can play. | Add your devices to the list on the config screen. |
+| `status` shows a warning line. | The daemon cannot use a part of the sound system. | Do the action that the warning gives. |
 
-**Nothing switches when I connect.** Look at the status screen or run
-`poweraudio status`. No `bluetooth connected` line means the D-Bus subscription
-never came up, so check that `bluetoothd` is running. A `connected` line with
-nothing after it means the sink never appeared, which you can confirm with
-`pactl list sinks short` while the device is connected.
+To see the log, run `journalctl --user -u poweraudio -f`.
 
-**It switches to the wrong thing on disconnect.** Your priority list is either
-empty or nothing on it is present, in which case the daemon falls back to the
-first sink it can find. Add the devices you actually use on the config screen.
+## Remove
 
-**The unit is inactive but a daemon is running.** A daemon that finds another
-one already listening logs `another poweraudio daemon is already listening` and
-exits 0. That is deliberate: the unit restarts on failure every five seconds,
-and a session daemon holding the socket used to keep it in that loop until
-logout. Stop the session daemon and start the unit, or just keep using the one
-you have.
+```bash
+./uninstall.sh          # Stops the daemon. Removes the binary, service file and socket.
+./uninstall.sh --purge  # Also removes ~/.config/poweraudio.
+```
 
-## Working on it
+## Development
 
 ```bash
 go build ./...
@@ -462,12 +174,7 @@ go vet ./...
 go test -race ./...
 ```
 
-The tests cover the parsing that talks to `pactl` and BlueZ, the priority
-matching, the config round trip, the IPC server including the subscription
-stream, the locking around the daemon's shared state, the config file watch,
-every CLI command against a fake client, and the UI's screens at five terminal
-sizes. They need no audio server: the backend is stubbed and the samples are
-captured output.
+The tests do not need an audio server.
 
 ## License
 
