@@ -1,0 +1,49 @@
+[
+ {
+  "index": 33,
+  "driver": "PipeWire",
+  "properties": {
+   "application.name": "WirePlumber",
+   "application.version": "0.4.17",
+   "application.process.binary": "wireplumber",
+   "core.version": "1.6.9"
+  }
+ },
+ {
+  "index": 34,
+  "driver": "PipeWire",
+  "properties": {
+   "application.name": "pipewire",
+   "application.process.binary": "pipewire",
+   "core.version": "1.6.9"
+  }
+ },
+ {
+  "index": 52,
+  "driver": "PipeWire",
+  "properties": {
+   "application.name": "pactl",
+   "application.process.binary": "pactl",
+   "core.version": "1.6.9"
+  }
+ },
+ {
+  "index": 126,
+  "driver": "PipeWire",
+  "properties": {
+   "application.name": "gnome-shell",
+   "application.process.binary": "gnome-shell",
+   "core.version": "1.6.9"
+  }
+ },
+ {
+  "index": 127,
+  "driver": "PipeWire",
+  "properties": {
+   "application.name": "GNOME Shell Volume Control",
+   "application.version": "50.5",
+   "application.process.binary": "gnome-shell",
+   "core.version": "1.6.9"
+  }
+ }
+]

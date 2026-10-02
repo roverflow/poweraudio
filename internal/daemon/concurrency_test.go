@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 
@@ -15,6 +16,14 @@ type stubBackend struct {
 	mu      sync.Mutex
 	devices []audio.Device
 	current string
+	// lists counts ListSinks calls and sets records every SetDefaultSink,
+	// so a test can tell a cheap refresh from a full one and see every
+	// switch the daemon made, including ones that landed where it already was.
+	lists int
+	sets  []string
+	// refuse makes SetDefaultSink fail for these sinks, the way PipeWire
+	// answers "Not supported" for the placeholder.
+	refuse map[string]bool
 }
 
 func (b *stubBackend) Name() string { return "stub" }
@@ -22,6 +31,7 @@ func (b *stubBackend) Name() string { return "stub" }
 func (b *stubBackend) ListSinks(context.Context) ([]audio.Device, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.lists++
 	out := make([]audio.Device, len(b.devices))
 	copy(out, b.devices)
 	for i := range out {
@@ -30,21 +40,33 @@ func (b *stubBackend) ListSinks(context.Context) ([]audio.Device, error) {
 	return out, nil
 }
 
-func (b *stubBackend) GetDefaultSink(ctx context.Context) (*audio.Device, error) {
-	sinks, _ := b.ListSinks(ctx)
-	for i := range sinks {
-		if sinks[i].IsDefault {
-			return &sinks[i], nil
-		}
-	}
-	return nil, nil
+func (b *stubBackend) DefaultSinkName(context.Context) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.current, nil
 }
 
 func (b *stubBackend) SetDefaultSink(_ context.Context, id string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.sets = append(b.sets, id)
+	if b.refuse[id] {
+		return errors.New("Failure: Not supported")
+	}
 	b.current = id
 	return nil
+}
+
+func (b *stubBackend) switches() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.sets...)
+}
+
+func (b *stubBackend) listCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.lists
 }
 
 func (b *stubBackend) SetVolume(context.Context, string, int) error { return nil }
@@ -124,8 +146,8 @@ func TestConfigAccessRace(t *testing.T) {
 				_ = d.Config()
 				_ = d.GetDevices()
 				_ = d.Snapshot()
-				_ = d.hasPending()
-				_ = d.hasDevice("1")
+				_ = d.switcher.waiting()
+				_ = d.isHolding()
 				_ = d.deviceName("2")
 				_ = d.defaultID()
 			}
@@ -138,7 +160,7 @@ func TestConfigAccessRace(t *testing.T) {
 			for j := 0; j < 200; j++ {
 				d.updatePriorities([]config.PriorityEntry{{Match: "JBL"}})
 				d.infof("event %d/%d", n, j)
-				_ = d.takeOwnSwitch("2")
+				_, _ = d.takeClaim("2")
 			}
 		}(i)
 	}
@@ -165,7 +187,7 @@ func TestSwitchesSerialize(t *testing.T) {
 			if n%2 == 0 {
 				id = "2"
 			}
-			if err := d.SetDefault(ctx, id); err != nil {
+			if err := d.SetDefault(ctx, id, false); err != nil {
 				t.Errorf("SetDefault(%s): %v", id, err)
 			}
 		}(i)

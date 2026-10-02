@@ -8,7 +8,9 @@ import (
 	"strings"
 
 	"github.com/roverflow/poweraudio/internal/audio"
+	"github.com/roverflow/poweraudio/internal/config"
 	"github.com/roverflow/poweraudio/internal/ipc"
+	"github.com/roverflow/poweraudio/internal/priority"
 )
 
 // The range the backends accept. Above 100 is software gain, which PipeWire
@@ -105,10 +107,15 @@ func indexes(devices []audio.Device) []int {
 }
 
 // nextDevice is the device after the current default in list order, wrapping
-// past the end and skipping anything the backend reports as unavailable. With
-// no default it starts from the top of the list, which is what a first press
-// of the media key should do.
-func nextDevice(devices []audio.Device) (*audio.Device, error) {
+// past the end and skipping anything that cannot play. With no default it
+// starts from the top of the list, which is what a first press of the media
+// key should do.
+//
+// The "Dummy Output" placeholder is never a stop, and neither is a virtual
+// sink such as a null sink or an EasyEffects chain unless the ranking names
+// it. Cycling through those meant pressing the key two or three extra times
+// to get from the speakers to the headset.
+func nextDevice(devices []audio.Device, ranking []config.PriorityEntry) (*audio.Device, error) {
 	n := len(devices)
 	if n == 0 {
 		return nil, errors.New("the daemon reports no output devices")
@@ -124,11 +131,15 @@ func nextDevice(devices []audio.Device) (*audio.Device, error) {
 
 	for offset := 1; offset <= n; offset++ {
 		candidate := &devices[(start+offset+n)%n]
-		if candidate.Available {
-			return candidate, nil
+		if !candidate.Usable() {
+			continue
 		}
+		if candidate.Virtual && priority.Rank(*candidate, ranking) >= len(ranking) {
+			continue
+		}
+		return candidate, nil
 	}
-	return nil, errors.New("no available device to switch to")
+	return nil, errors.New("no other output can play right now")
 }
 
 // targetDevice is the device a command acts on: the one the query names, or

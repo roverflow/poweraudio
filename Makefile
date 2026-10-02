@@ -28,7 +28,7 @@ install: build
 
 uninstall:
 	systemctl --user disable --now poweraudio 2>/dev/null || true
-	-pkill -f "poweraudio --daemon" 2>/dev/null || true
+	-pkill -f '^[^ ]*poweraudio( [^ ]+)* (--daemon|daemon)( |$$)' 2>/dev/null || true
 	rm -f $(PREFIX)/bin/$(BINARY)
 	rm -f $(HOME)/.config/systemd/user/poweraudio.service
 	systemctl --user daemon-reload 2>/dev/null || true

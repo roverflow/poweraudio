@@ -10,6 +10,7 @@ import (
 
 	"github.com/roverflow/poweraudio/internal/audio"
 	"github.com/roverflow/poweraudio/internal/config"
+	"github.com/roverflow/poweraudio/internal/probe"
 )
 
 const (
@@ -61,6 +62,13 @@ type StatusData struct {
 	Backend    string    `json:"backend"`
 	ConfigPath string    `json:"config_path"`
 	StartedAt  time.Time `json:"started_at"`
+	// Switching names the engine deciding where the output goes, such as
+	// "pactl". Machines differ in what they support, so this is what tells
+	// someone reading a bug report which path the daemon took.
+	Switching string `json:"switching,omitempty"`
+	// Audio is what the daemon found out about the sound stack. It is the
+	// zero value until the first probe finishes, a moment after start.
+	Audio probe.Report `json:"audio"`
 }
 
 // Snapshot is the daemon's whole visible state at one moment. Events are
@@ -84,6 +92,10 @@ func (s *Snapshot) Default() *audio.Device {
 
 type SetDefaultParams struct {
 	DeviceID string `json:"device_id"`
+	// Notify asks for a desktop notification naming the new output. A
+	// hotkey bound to `poweraudio next` sets it, since there is no terminal
+	// to read the answer from. A daemon that predates the field ignores it.
+	Notify bool `json:"notify,omitempty"`
 }
 
 type SetVolumeParams struct {

@@ -121,7 +121,7 @@ func (m statusModel) View() string {
 
 	title := "  " + styleTitle.Render("Daemon Status")
 	if !fields {
-		title += styleMuted.Render("   " + m.status.Backend)
+		title += styleMuted.Render("   " + m.audioLine())
 	}
 	if hint := scrollHint(m.evOffset, visible, len(m.events)); hint != "" {
 		title += styleMuted.Render(fmt.Sprintf("   %s  %d", hint, len(m.events)))
@@ -130,7 +130,7 @@ func (m statusModel) View() string {
 	header := []string{title, ""}
 	if fields {
 		header = append(header,
-			field("Backend", styleActive.Render(truncate(m.status.Backend, w-14))),
+			field("Audio", styleActive.Render(truncate(m.audioLine(), w-14))),
 			field("Config", styleMuted.Render(truncate(m.status.ConfigPath, w-14))),
 			field("Uptime", styleNormal.Render(m.uptime())),
 			field("Service", m.serviceState()),
@@ -191,6 +191,20 @@ func (m statusModel) eventRows() int {
 		return n
 	}
 	return 1
+}
+
+// audioLine names the sound stack the daemon found and the engine it chose,
+// "PipeWire 1.6.9, WirePlumber 0.5.17 · pactl". Until the first probe lands,
+// or from a daemon that predates it, it falls back to the backend name.
+func (m statusModel) audioLine() string {
+	if m.status.Audio.ProbedAt.IsZero() {
+		return m.status.Backend
+	}
+	line := m.status.Audio.Summary()
+	if m.status.Switching != "" {
+		line += " · " + m.status.Switching
+	}
+	return line
 }
 
 func (m statusModel) uptime() string {

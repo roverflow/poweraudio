@@ -114,8 +114,12 @@ func (f *fakeClient) Subscribe(_ context.Context) (<-chan ipc.Snapshot, error) {
 	return f.stream, nil
 }
 
-func (f *fakeClient) SetDefault(deviceID string) error {
-	f.record("set_default %s", deviceID)
+func (f *fakeClient) SetDefault(deviceID string, notify bool) error {
+	if notify {
+		f.record("set_default %s notify", deviceID)
+	} else {
+		f.record("set_default %s", deviceID)
+	}
 	return f.err
 }
 

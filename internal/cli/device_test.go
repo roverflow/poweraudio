@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/roverflow/poweraudio/internal/audio"
+	"github.com/roverflow/poweraudio/internal/config"
 	"github.com/roverflow/poweraudio/internal/ipc"
 )
 
@@ -84,6 +85,7 @@ func TestNextDevice(t *testing.T) {
 	cases := []struct {
 		name    string
 		devices []audio.Device
+		ranking []config.PriorityEntry
 		wantID  string
 		wantErr string
 	}{
@@ -120,18 +122,46 @@ func TestNextDevice(t *testing.T) {
 		{
 			name:    "nothing available",
 			devices: []audio.Device{sink("a", true, false), sink("b", false, false)},
-			wantErr: "no available device to switch to",
+			wantErr: "no other output can play right now",
 		},
 		{
 			name:    "no devices at all",
 			devices: nil,
 			wantErr: "no output devices",
 		},
+		{
+			name: "never stops on the placeholder",
+			devices: []audio.Device{
+				sink("a", true, true),
+				{ID: audio.PlaceholderID, Name: "Dummy Output", Available: true, Virtual: true},
+				sink("c", false, true),
+			},
+			wantID: "c",
+		},
+		{
+			name: "skips an unranked virtual sink",
+			devices: []audio.Device{
+				sink("a", true, true),
+				{ID: "easyeffects_sink", Name: "Easy Effects Sink", Available: true, Virtual: true},
+				sink("c", false, true),
+			},
+			wantID: "c",
+		},
+		{
+			name: "stops on a virtual sink the ranking names",
+			devices: []audio.Device{
+				sink("a", true, true),
+				{ID: "easyeffects_sink", Name: "Easy Effects Sink", Available: true, Virtual: true},
+				sink("c", false, true),
+			},
+			ranking: []config.PriorityEntry{{Match: "Easy Effects"}},
+			wantID:  "easyeffects_sink",
+		},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			dev, err := nextDevice(c.devices)
+			dev, err := nextDevice(c.devices, c.ranking)
 			if c.wantErr != "" {
 				if err == nil {
 					t.Fatalf("nextDevice = %+v, want an error", dev)

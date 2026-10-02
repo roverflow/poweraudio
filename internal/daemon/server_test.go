@@ -72,7 +72,7 @@ func TestIPCRoundTrip(t *testing.T) {
 		t.Errorf("default = %v, want the sink the backend is on", dev)
 	}
 
-	if err := client.SetDefault("2"); err != nil {
+	if err := client.SetDefault("2", false); err != nil {
 		t.Fatalf("SetDefault: %v", err)
 	}
 	backend.mu.Lock()

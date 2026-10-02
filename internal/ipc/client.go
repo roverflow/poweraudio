@@ -145,8 +145,10 @@ func (c *Client) Subscribe(ctx context.Context) (<-chan Snapshot, error) {
 	return ch, nil
 }
 
-func (c *Client) SetDefault(deviceID string) error {
-	return c.call(MethodSetDefault, SetDefaultParams{DeviceID: deviceID}, nil)
+// SetDefault makes deviceID the default output. notify asks the daemon for a
+// desktop notification once it has switched.
+func (c *Client) SetDefault(deviceID string, notify bool) error {
+	return c.call(MethodSetDefault, SetDefaultParams{DeviceID: deviceID, Notify: notify}, nil)
 }
 
 func (c *Client) SetVolume(deviceID string, percent int) error {

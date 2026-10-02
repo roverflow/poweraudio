@@ -29,9 +29,9 @@ Without a command poweraudio opens the terminal UI.
 | Command | What it does |
 |---------|--------------|
 | `list [--json]` | output devices, one per line, `*` on the default |
-| `status [--json]` | default device, backend, config path, uptime, recent events |
-| `set <query>` | make a device the default output |
-| `next` | switch to the next available device, wrapping around |
+| `status [--json]` | default device, the sound stack it found, config path, uptime, recent events |
+| `set <query> [--notify]` | make a device the default output |
+| `next [--notify]` | switch to the next device that can play, wrapping around |
 | `volume <+N\|-N\|N> [--device Q]` | set or adjust the volume, 0 to 150 percent |
 | `mute [--device Q]` | toggle mute and print the new state |
 | `watch [--json]` | print a line every time the default device or its level changes |
@@ -44,6 +44,12 @@ case-insensitive substring. `set razer` is enough when only one device is a
 Razer; `set analog` on a machine with three analog outputs lists all three and
 exits 1. `volume` and `mute` act on the default device unless `--device` says
 otherwise.
+
+`next` passes over the "Dummy Output" placeholder and over virtual sinks, such
+as an EasyEffects chain or a null sink, unless your ranking names one.
+`--notify` asks the daemon for a desktop notification naming the new output,
+which is what you want when `next` is bound to a key and there is no terminal
+to read.
 
 Output is plain text with no colour. Exit codes: 0 on success, 1 when the daemon
 is not running or refused the request, 2 for a bad command line.
@@ -68,10 +74,14 @@ daemon owns the file.
 
 - Linux with PipeWire (with pipewire-pulse, which every desktop install ships)
   or PulseAudio
-- `pactl`, which comes with either
+- `pactl` that can print JSON, from PulseAudio 16 or newer or from PipeWire.
+  Ubuntu 22.04's 15.99.1 is new enough
 - BlueZ on the system bus, for the Bluetooth half
 - systemd user session, if you want the daemon to start on login
-- `notify-send` for desktop notifications, optional
+- logind on the system bus, so the daemon notices suspend, resume and
+  shutdown, optional
+- a notification server on the session bus for desktop notifications, which
+  every desktop has, optional
 - Go 1.25 or newer to build (`go.mod` pins 1.25.10)
 
 Everything runs as your user. Nothing needs root.
@@ -118,8 +128,11 @@ Worth reading once, because it explains every delay you will notice.
 BlueZ publishes a `PropertiesChanged` signal on the system bus whenever a
 device's `Connected` property flips. The daemon subscribes under the
 `/org/bluez` path namespace, pulls the MAC out of the object path
-(`/org/bluez/hci0/dev_3C_B0_ED_3A_2C_42`) and reads the `Alias` property for a
-human name.
+(`/org/bluez/hci0/dev_3C_B0_ED_3A_2C_42`) and reads the device's properties in
+one call: the alias for a human name and the list of profiles it offers. A
+device with no audio output profile, such as a mouse or a keyboard, gets a
+debug line and nothing else, so one waking from idle cannot get in the way of
+a headset's switch.
 
 Bluetooth connecting is not the same event as an audio sink appearing.
 PipeWire creates the `bluez_output.*` sink some time after BlueZ reports the
@@ -129,10 +142,15 @@ the sink still is not there, the event is parked and retried every 500ms until
 15 seconds have passed. The timer is only a safety net: `pactl subscribe`
 reports the sink appearing, and that event triggers the switch directly, so a
 slow adapter usually lands the moment its sink shows up rather than on the next
-tick. A parked device is only forgotten when that same device disconnects, so
-a second headset going away does not cancel the first one's switch.
+tick. Every parked device has its own slot, and it is only forgotten when that
+same device disconnects, so a second headset going away does not cancel the
+first one's switch.
 
-Once it finds the sink it runs `pactl set-default-sink <name>`.
+Once it finds the sink it runs `pactl set-default-sink <name>`. WirePlumber
+often gets there first, because it remembers a headset you have used and
+restores it the moment its sink appears. The daemon then leaves the output
+where it is and still records where it was before, for
+`on_disconnect = "previous"`.
 
 Disconnect is the same shape in reverse. The daemon waits 300ms for the sink to
 vanish and re-lists. If the sink that was playing is still there and can still
@@ -145,7 +163,37 @@ A sink can stay listed and still be unable to play. The active port is where
 the audio is going, and pactl marks that port `not available` when nothing is
 plugged into it. The daemon then runs the same fallback it runs when the sink
 disappears. A port marked `availability unknown` stays usable. `SUSPENDED` is
-only an idle sink, and those stay usable too.
+only an idle sink, and those stay usable too. If something else moves the
+output onto a sink that cannot play, the daemon moves it off again. WirePlumber
+does this after a resume, when it restores a device from its own history.
+
+The "Dummy Output" placeholder, which both servers show when no real output is
+left, is never a fallback. PipeWire refuses to make it the default anyway. When
+nothing else can play, the daemon logs `no output left to fall back to`, once
+per outage, and moves to the first real sink that comes back. Virtual sinks are only a
+fallback when your ranking names them, since audio sent to one goes nowhere on
+its own.
+
+Sinks do not arrive all at once. At login WirePlumber publishes sound cards
+one at a time over a second or more, and after a resume USB, HDMI and
+Bluetooth outputs come back in any order. Falling back in the middle of that
+picks whatever happens to be there first, which on a desk with a monitor
+attached is the HDMI output. So the daemon holds off. It makes no fallback
+decision until the sink list has been quiet for 1.5 seconds after startup, or
+2 seconds after a resume, and waits no longer than 10 and 15 seconds. When the
+hold ends it checks the default once and moves only if that default cannot
+play. A Bluetooth headset connecting during a hold still takes the output. The
+daemon hears from logind's `PrepareForSleep` and `PrepareForShutdown` signals
+and makes no switches at all while the machine goes to sleep or shuts down.
+Shutdown needs it too, because GNOME closes your login session first, which
+takes the session's access to the sound cards away while the daemon is still
+running. A cancelled shutdown ends the hold the same way a resume does.
+
+`pactl subscribe` ends whenever the sound server restarts, which is the usual
+fix for Bluetooth trouble. The daemon starts it again, waiting a second and
+doubling up to thirty while the server is down, logs `audio event stream
+reconnected` once events flow, and holds the same way it does at startup while
+the sinks come back.
 
 The Barracuda X receiver is the exception that reports unknown either way.
 Powering the earcups off does not remove the sound card. The dongle pushes one
@@ -154,7 +202,9 @@ earcups are on and `00` when they are off. The daemon marks that sink unable
 to play and runs the fallback. It does not repeat the report while the state
 holds, so a daemon that starts with the earcups already off waits for the next
 press. Reading the report needs the udev rule in `configs/70-poweraudio.rules`,
-because the node is root-only without it.
+because the node is root-only without it. Right after boot the node can stay
+root-only for a second or two, until your login session is active, so failures
+in the first 30 seconds are debug lines rather than warnings.
 
 A priority entry matches a device when `match` is a case-insensitive substring
 of the device's name, its technical sink name or its MAC address. If the entry
@@ -288,6 +338,19 @@ that device has gone or its port can no longer play.
 before the daemon goes looking for it. Raise it if your adapter is slow, though
 the retries cover most of that already.
 
+`notifications.enabled` turns desktop notifications on or off. The daemon sends
+them straight to the desktop's notification server over D-Bus. Each one
+replaces the last instead of stacking, a burst of switches within 300
+milliseconds shows up as one notification naming where the output ended up,
+and they are marked transient so they stay out of the notification history.
+Nothing is shown during the startup hold, while the machine sleeps, or for the
+Dummy Output placeholder, and nothing is sent before the desktop's
+notification server is running. After a resume you get one notification, and
+only if the output ended up somewhere other than where it was. A switch you
+make with poweraudio itself is quiet unless you pass `--notify`.
+`on_device_change` covers changes made outside poweraudio, such as from the
+desktop's sound settings.
+
 `log_level` is the lowest level written to stderr, which systemd captures. The
 in-memory log the UI shows keeps every level regardless. `log_file` appends the
 same lines to a file, useful for a daemon that was not started by systemd.
@@ -310,6 +373,11 @@ are amber, failures are red. Sinks appearing and going away are debug lines
 and name the device rather than a number. `poweraudio status` prints the last
 ten from a shell.
 
+The status screen and `poweraudio status` name the sound stack the daemon
+found, such as `PipeWire 1.6.9, WirePlumber 0.5.17`, and the engine making the
+switching decisions. Anything the check could not do, such as a pactl too old
+to print JSON, shows up there as a warning.
+
 `skipping switch: X is not ranked above Y` means `on_connect` is set to
 `priority` and your ranking said no. `giving up waiting for the audio sink of
 X` means BlueZ connected but PipeWire never produced a sink, which is usually a
@@ -329,7 +397,16 @@ socket serving newline-delimited JSON requests. It shells out to `pactl` rather
 than linking against anything, so there is no cgo and no libpipewire version
 to match. Listing sinks costs one small JSON document per refresh; the previous
 backend parsed the entire PipeWire object graph, about half a megabyte, to find
-four sinks.
+four sinks. A change of default reads only the default's name, and the UI is
+only sent a snapshot when the sink list actually changed.
+
+The daemon decides nothing about switching itself. It tells a switching engine
+what happened, a headset connecting or a sink going away, and the engine
+decides. Today there is one engine, which makes every decision and drives
+`pactl`. It is what runs on PulseAudio, on WirePlumber 0.4 and on anything the
+startup check does not recognise. That check asks `pactl info`, the server's
+client list and WirePlumber's settings metadata which sound server, session
+manager and settings this machine has, about 15 milliseconds in all.
 
 Without arguments you get the UI, built on Bubble Tea. It owns no audio state.
 It opens one `subscribe` connection and the daemon pushes a snapshot of
@@ -343,8 +420,11 @@ request out, printed plainly.
 ```
 internal/audio       one pactl backend behind the Backend interface
 internal/bluetooth   BlueZ D-Bus subscription
+internal/power       suspend, resume and shutdown, from logind
+internal/probe       which sound server, session manager and settings are present
+internal/notify      desktop notifications over D-Bus
 internal/priority    the matcher the daemon and the UI share
-internal/daemon      event loop, switching rules, IPC server, subscriptions
+internal/daemon      event loop, holds, switching engine, IPC server, subscriptions
 internal/ipc         wire protocol and client
 internal/tui         Bubble Tea screens
 internal/cli         subcommands

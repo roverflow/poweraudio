@@ -175,7 +175,7 @@ func setDefaultCmd(client *ipc.Client, deviceID string) tea.Cmd {
 		if client == nil {
 			return setDefaultMsg{err: errNoDaemon}
 		}
-		return setDefaultMsg{err: client.SetDefault(deviceID)}
+		return setDefaultMsg{err: client.SetDefault(deviceID, false)}
 	}
 }
 
