@@ -74,20 +74,8 @@ func (b *pactlBackend) ListSinks(ctx context.Context) ([]Device, error) {
 	return devicesFrom(sinks, defaultName), nil
 }
 
-func (b *pactlBackend) GetDefaultSink(ctx context.Context) (*Device, error) {
-	sinks, err := b.ListSinks(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for _, s := range sinks {
-		if s.IsDefault {
-			return &s, nil
-		}
-	}
-	if len(sinks) > 0 {
-		return &sinks[0], nil
-	}
-	return nil, fmt.Errorf("no audio sinks found")
+func (b *pactlBackend) DefaultSinkName(ctx context.Context) (string, error) {
+	return b.defaultSinkName(ctx)
 }
 
 func (b *pactlBackend) SetDefaultSink(ctx context.Context, deviceID string) error {
@@ -187,6 +175,7 @@ func deviceFrom(s pactlSink, defaultName string) Device {
 		Available:   sinkAvailable(s),
 		Volume:      channelVolume(s.Volume),
 		Muted:       s.Mute,
+		Virtual:     isVirtual(s),
 	}
 	if dev.Type == DeviceTypeBluetooth {
 		dev.MACAddress = macAddress(s)
@@ -194,6 +183,28 @@ func deviceFrom(s pactlSink, defaultName string) Device {
 	dev.VendorID = parseHexID(s.Properties["device.vendor.id"])
 	dev.ProductID = parseHexID(s.Properties["device.product.id"])
 	return dev
+}
+
+// isVirtual reports a sink with no hardware behind it. PipeWire marks null
+// sinks with the null-audio-sink factory or node.virtual, filters carry a
+// device.class of filter, and plain PulseAudio calls its null sink abstract.
+// A sink that publishes none of these is treated as hardware, which is what
+// every sink was before this check existed.
+func isVirtual(s pactlSink) bool {
+	if s.Name == PlaceholderID {
+		return true
+	}
+	if s.Properties["node.virtual"] == "true" {
+		return true
+	}
+	if s.Properties["factory.name"] == "support.null-audio-sink" {
+		return true
+	}
+	switch s.Properties["device.class"] {
+	case "abstract", "filter", "monitor":
+		return true
+	}
+	return false
 }
 
 // parseHexID reads pactl's "0x1532". An empty or unreadable value is zero,

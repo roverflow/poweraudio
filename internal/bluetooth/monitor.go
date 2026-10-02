@@ -13,6 +13,11 @@ type Event struct {
 	DeviceName string
 	Connected  bool
 	ObjectPath string
+	// NotAudio is true only when BlueZ says the device offers no audio
+	// output profile, such as a mouse or a keyboard. A device BlueZ could
+	// not describe counts as audio, so an unknown headset still switches,
+	// and so does an Event built without the field.
+	NotAudio bool
 }
 
 type Monitor struct {
@@ -100,25 +105,59 @@ func (m *Monitor) parseSignal(sig *dbus.Signal) (Event, bool) {
 	}
 
 	path := string(sig.Path)
-	mac := macFromPath(path)
-	name := m.getDeviceName(path)
+	props := m.deviceProps(path)
+	name, _ := props["Alias"].Value().(string)
+	uuids, _ := props["UUIDs"].Value().([]string)
+	icon, _ := props["Icon"].Value().(string)
 
 	return Event{
-		MACAddress: mac,
+		MACAddress: macFromPath(path),
 		DeviceName: name,
 		Connected:  connected,
 		ObjectPath: path,
+		NotAudio:   !isAudio(uuids, icon),
 	}, true
 }
 
-func (m *Monitor) getDeviceName(path string) string {
+// deviceProps reads every Device1 property in one round trip. Asking for the
+// alias, the profiles and the icon one at a time cost three. A device that has
+// already gone away answers with an error, and an empty map then reads as an
+// unnamed device of unknown kind.
+func (m *Monitor) deviceProps(path string) map[string]dbus.Variant {
+	var props map[string]dbus.Variant
 	obj := m.conn.Object("org.bluez", dbus.ObjectPath(path))
-	variant, err := obj.GetProperty("org.bluez.Device1.Alias")
-	if err != nil {
-		return ""
+	if err := obj.Call("org.freedesktop.DBus.Properties.GetAll", 0, "org.bluez.Device1").Store(&props); err != nil {
+		return map[string]dbus.Variant{}
 	}
-	name, _ := variant.Value().(string)
-	return name
+	return props
+}
+
+// audioOutputUUIDs are the profiles a device advertises when it can play
+// sound for us: A2DP sink, the headset and hands-free roles, and LE Audio's
+// stream and capability services.
+var audioOutputUUIDs = map[string]bool{
+	"0000110b-0000-1000-8000-00805f9b34fb": true, // A2DP Audio Sink
+	"0000110d-0000-1000-8000-00805f9b34fb": true, // A2DP
+	"00001108-0000-1000-8000-00805f9b34fb": true, // Headset
+	"00001131-0000-1000-8000-00805f9b34fb": true, // Headset HS
+	"0000111e-0000-1000-8000-00805f9b34fb": true, // Handsfree
+	"0000184e-0000-1000-8000-00805f9b34fb": true, // LE Audio stream control
+	"00001850-0000-1000-8000-00805f9b34fb": true, // LE Audio published capabilities
+}
+
+// isAudio decides whether a device could carry our output. The profile list is
+// the real answer. The icon covers a device whose profiles BlueZ has not
+// resolved yet, and a device with neither is given the benefit of the doubt.
+func isAudio(uuids []string, icon string) bool {
+	for _, u := range uuids {
+		if audioOutputUUIDs[strings.ToLower(u)] {
+			return true
+		}
+	}
+	if strings.HasPrefix(icon, "audio-") {
+		return true
+	}
+	return len(uuids) == 0 && icon == ""
 }
 
 func macFromPath(path string) string {

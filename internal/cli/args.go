@@ -7,12 +7,14 @@ import "strings"
 type flagSpec struct {
 	json   bool
 	device bool
+	notify bool
 }
 
 // options is what a command line asked for beyond its positional arguments.
 type options struct {
 	json   bool
 	device string
+	notify bool
 }
 
 // parseOptions splits args into the flags a command accepts and everything
@@ -37,6 +39,9 @@ func parseOptions(cmd string, args []string, spec flagSpec) ([]string, options, 
 
 		case spec.json && arg == "--json":
 			opts.json = true
+
+		case spec.notify && arg == "--notify":
+			opts.notify = true
 
 		case spec.device && (arg == "--device" || arg == "-d"):
 			if i+1 >= len(args) {

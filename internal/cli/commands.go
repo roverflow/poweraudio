@@ -65,7 +65,7 @@ func cmdStatus(args []string, client Client, out io.Writer) error {
 }
 
 func cmdSet(args []string, client Client, out io.Writer) error {
-	positional, _, err := parseOptions("set", args, flagSpec{})
+	positional, opts, err := parseOptions("set", args, flagSpec{notify: true})
 	if err != nil {
 		return err
 	}
@@ -82,7 +82,7 @@ func cmdSet(args []string, client Client, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := client.SetDefault(dev.ID); err != nil {
+	if err := client.SetDefault(dev.ID, opts.notify); err != nil {
 		return err
 	}
 
@@ -91,7 +91,7 @@ func cmdSet(args []string, client Client, out io.Writer) error {
 }
 
 func cmdNext(args []string, client Client, out io.Writer) error {
-	positional, _, err := parseOptions("next", args, flagSpec{})
+	positional, opts, err := parseOptions("next", args, flagSpec{notify: true})
 	if err != nil {
 		return err
 	}
@@ -103,11 +103,11 @@ func cmdNext(args []string, client Client, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	dev, err := nextDevice(snap.Devices)
+	dev, err := nextDevice(snap.Devices, snap.Config.Priority)
 	if err != nil {
 		return err
 	}
-	if err := client.SetDefault(dev.ID); err != nil {
+	if err := client.SetDefault(dev.ID, opts.notify); err != nil {
 		return err
 	}
 

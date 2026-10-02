@@ -281,20 +281,22 @@ func TestDisconnectOfAnotherDeviceKeepsPending(t *testing.T) {
 		devices: []audio.Device{{ID: "1", Name: "Speakers", Available: true}},
 		current: "1",
 	}
-	d := New(config.DefaultConfig(), backend, filepath.Join(t.TempDir(), "config.toml"))
+	cfg := config.DefaultConfig()
+	cfg.Switching.SwitchDelayMs = 0
+	d := New(cfg, backend, filepath.Join(t.TempDir(), "config.toml"))
 	ctx := context.Background()
 	d.refreshDevices(ctx)
 
-	waiting := &pendingBT{mac: "AA:BB:CC:DD:EE:FF", name: "Headset A", expiry: time.Now().Add(pendingTTL)}
-	d.mu.Lock()
-	d.pending = waiting
-	d.mu.Unlock()
+	d.handleBluetoothEvent(ctx, bluetooth.Event{Connected: true, MACAddress: "AA:BB:CC:DD:EE:FF", DeviceName: "Headset A"})
+	if !d.switcher.waiting() {
+		t.Fatal("headset A connected with no sink and the daemon is not waiting for it")
+	}
 
 	d.handleBluetoothEvent(ctx, bluetooth.Event{
 		MACAddress: "11:22:33:44:55:66",
 		DeviceName: "Headset B",
 	})
-	if !d.hasPending() {
+	if !d.switcher.waiting() {
 		t.Fatal("an unrelated disconnect dropped the device that was still waiting for its sink")
 	}
 
@@ -303,7 +305,7 @@ func TestDisconnectOfAnotherDeviceKeepsPending(t *testing.T) {
 		MACAddress: "aa:bb:cc:dd:ee:ff",
 		DeviceName: "Headset A",
 	})
-	if d.hasPending() {
+	if d.switcher.waiting() {
 		t.Error("the pending device disconnected and the daemon is still waiting for it")
 	}
 }
@@ -328,7 +330,7 @@ func TestConfigWatchReloadsRewrittenFile(t *testing.T) {
 	}()
 
 	d := New(cfg, &stubBackend{}, path)
-	go d.runEvents(ctx, nil, nil, nil)
+	go d.runEvents(ctx, sources{})
 
 	// The watch compares mtimes, so the rewrite has to land after the first
 	// poll has read the original one.

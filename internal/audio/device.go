@@ -53,4 +53,25 @@ type Device struct {
 	// server did not say.
 	VendorID  uint16 `json:"vendor_id,omitempty"`
 	ProductID uint16 `json:"product_id,omitempty"`
+	// Virtual is a sink with no hardware behind it: a null sink, a filter
+	// chain such as EasyEffects, a combine sink, or the placeholder below.
+	// The fallback and `next` pass over one unless the ranking names it,
+	// because audio sent there only comes out if something else carries it on.
+	Virtual bool `json:"virtual,omitempty"`
+}
+
+// PlaceholderID is the sink both servers create when there is no real output
+// left, shown as "Dummy Output". PipeWire refuses to make it the default
+// ("Not supported"), and nothing plays through it, so it is never a target.
+const PlaceholderID = "auto_null"
+
+// IsPlaceholder reports whether this is the "Dummy Output" sink.
+func (d Device) IsPlaceholder() bool {
+	return d.ID == PlaceholderID
+}
+
+// Usable reports whether audio sent here reaches someone: the port can play
+// and the sink is not the placeholder.
+func (d Device) Usable() bool {
+	return d.Available && !d.IsPlaceholder()
 }

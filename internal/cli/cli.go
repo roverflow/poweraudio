@@ -40,7 +40,7 @@ const daemonDown = `poweraudio: daemon is not running (start it with "poweraudio
 type Client interface {
 	Snapshot() (*ipc.Snapshot, error)
 	Subscribe(ctx context.Context) (<-chan ipc.Snapshot, error)
-	SetDefault(deviceID string) error
+	SetDefault(deviceID string, notify bool) error
 	SetVolume(deviceID string, percent int) error
 	ToggleMute(deviceID string) error
 	ReloadConfig() error
@@ -145,8 +145,8 @@ Without a command poweraudio opens the terminal UI.
 commands:
   list [--json]                  output devices, one per line
   status [--json]                default device, backend, uptime, recent events
-  set <query>                    make a device the default output
-  next                           switch to the next available device
+  set <query> [--notify]         make a device the default output
+  next [--notify]                switch to the next device that can play
   volume <+N|-N|N> [--device Q]  set or adjust the volume, 0 to 150 percent
   mute [--device Q]              toggle mute
   watch [--json]                 print a line every time the default changes
@@ -161,6 +161,9 @@ flags:
 
 A query matches a device id, name, description or MAC address, either exactly
 or as a case-insensitive substring.
+
+--notify shows a desktop notification naming the new output, for set and next
+bound to a key where there is no terminal to print to.
 `
 
 // Usage writes the command reference. main uses it for the top level flag

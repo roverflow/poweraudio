@@ -26,6 +26,11 @@ skip()  { printf "  %s\n" "$*" >&2; }
 PURGE=false
 YES=false
 
+# Matches the daemon by its own command line: the poweraudio binary followed by
+# --daemon or daemon, flags allowed in between. A bare "poweraudio --daemon"
+# pattern also matched any shell or editor whose arguments mentioned it.
+DAEMON_PATTERN='^[^ ]*poweraudio( [^ ]+)* (--daemon|daemon)( |$)'
+
 usage() {
     cat >&2 <<EOF
 Usage: $(basename "$0") [OPTIONS]
@@ -89,7 +94,7 @@ detect() {
     fi
 
     local orphan_pids
-    orphan_pids=$(pgrep -f "poweraudio --daemon" 2>/dev/null || true)
+    orphan_pids=$(pgrep -f "$DAEMON_PATTERN" 2>/dev/null || true)
     if [[ -n "$orphan_pids" ]]; then
         info "Orphan daemon process(es): ${orphan_pids//$'\n'/, }"
         found=1
@@ -133,7 +138,7 @@ stop_service() {
 
 kill_orphans() {
     local pids
-    pids=$(pgrep -f "poweraudio --daemon" 2>/dev/null || true)
+    pids=$(pgrep -f "$DAEMON_PATTERN" 2>/dev/null || true)
     if [[ -z "$pids" ]]; then
         return
     fi

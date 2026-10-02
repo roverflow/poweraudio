@@ -7,6 +7,7 @@ import (
 
 	"github.com/roverflow/poweraudio/internal/audio"
 	"github.com/roverflow/poweraudio/internal/ipc"
+	"github.com/roverflow/poweraudio/internal/probe"
 )
 
 func TestRenderList(t *testing.T) {
@@ -43,6 +44,29 @@ Sep 18 09:01:30  warn  waiting for the audio sink of JBL Tune 520BT
 
 	if got := renderStatus(&snap, started.Add(2*time.Hour+3*time.Minute)); got != want {
 		t.Errorf("renderStatus =\n%q\nwant\n%q", got, want)
+	}
+}
+
+func TestRenderStatusNamesTheAudioStack(t *testing.T) {
+	snap := fixture()
+	snap.Events = nil
+	snap.Status.Switching = "pactl"
+	snap.Status.Audio = probe.Report{
+		Server: probe.ServerPipeWire, ServerVersion: "1.6.9",
+		Manager: probe.ManagerWirePlumber, ManagerVersion: "0.5.17",
+		Problems: []string{"pw-metadata is missing"},
+		ProbedAt: started,
+	}
+	want := `default    JBL Tune 520BT  80%
+backend    pipewire
+audio      PipeWire 1.6.9, WirePlumber 0.5.17
+switching  pactl
+warning    pw-metadata is missing
+config     /home/u/.config/poweraudio/config.toml
+uptime     2h 3m
+`
+	if got := renderStatus(&snap, started.Add(2*time.Hour+3*time.Minute)); got != want {
+		t.Errorf("renderStatus =\n%s\nwant\n%s", got, want)
 	}
 }
 

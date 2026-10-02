@@ -1,14 +1,14 @@
 // Package daemon is the long-running half of poweraudio. It watches BlueZ and
-// the audio backend, decides where the default output belongs, and serves the
-// state a UI needs over a Unix socket. Everything a client can ask for goes
-// through Handle or Subscribe; the rest of the package is unexported.
+// the audio backend, hands switching decisions to the engine this machine
+// supports, and serves the state a UI needs over a Unix socket. Everything a
+// client can ask for goes through Handle or Subscribe; the rest of the package
+// is unexported.
 package daemon
 
 import (
 	"context"
-	"fmt"
 	"os"
-	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -17,7 +17,9 @@ import (
 	"github.com/roverflow/poweraudio/internal/bluetooth"
 	"github.com/roverflow/poweraudio/internal/config"
 	"github.com/roverflow/poweraudio/internal/ipc"
-	"github.com/roverflow/poweraudio/internal/priority"
+	"github.com/roverflow/poweraudio/internal/notify"
+	"github.com/roverflow/poweraudio/internal/power"
+	"github.com/roverflow/poweraudio/internal/probe"
 	"github.com/roverflow/poweraudio/internal/razer"
 )
 
@@ -42,23 +44,41 @@ const (
 	// maxEvents is the size of the in-memory log the status screen reads. It
 	// keeps every level, so a debug line still costs a slot.
 	maxEvents = 200
+
+	// quietStart is how long after startup a failure to open the Barracuda
+	// node is expected. The udev rule grants access when the login session
+	// becomes active, which is a second or two after a boot-time start.
+	quietStart = 30 * time.Second
+)
+
+// Holds keep the daemon from falling back while sinks are still arriving. At
+// boot WirePlumber publishes cards one at a time over a second or more, and
+// after a resume USB, HDMI and Bluetooth come back in any order. Falling back
+// in the middle picked whatever happened to be there first, which on a desk
+// with a monitor attached was the HDMI output, every boot. A hold ends once
+// the sink list has been quiet for holdStable, or at its cap, and then the
+// default is checked once. Sleep and shutdown hold with no cap at all, until
+// logind says the machine is back.
+//
+// They are variables so tests can shorten them.
+var (
+	holdStable       = 1500 * time.Millisecond
+	holdStartupMax   = 10 * time.Second
+	holdResumeStable = 2 * time.Second
+	holdResumeMax    = 15 * time.Second
+
+	// resubscribeMin and resubscribeMax bound the wait before following
+	// pactl subscribe again after it ended.
+	resubscribeMin = time.Second
+	resubscribeMax = 30 * time.Second
 )
 
 // configPollInterval is how often the config file's mtime is checked. It is a
 // variable so tests do not have to wait two seconds for a reload.
 var configPollInterval = 2 * time.Second
 
-// pendingBT is a Bluetooth device that has connected but whose audio sink
-// PipeWire has not published yet.
-type pendingBT struct {
-	mac    string
-	name   string
-	expiry time.Time
-}
-
 type Daemon struct {
-	backend   audio.Backend
-	btMonitor *bluetooth.Monitor
+	backend audio.Backend
 
 	// configPath is where this daemon was told to read its config, so saves
 	// from the UI land in the same file rather than always in the default one.
@@ -68,14 +88,17 @@ type Daemon struct {
 	mu            sync.RWMutex
 	cfg           config.Config
 	devices       []audio.Device
-	previousID    string
 	lastDefaultID string
 	events        []ipc.EventLog
-	pending       *pendingBT
-	// ownSwitchID is the sink this daemon just selected. The matching event
-	// from pactl arrives afterwards, and without this the daemon announces its
-	// own switch a second time.
-	ownSwitchID string
+	// claim is the switch this daemon is about to make. The sink list read
+	// that shows it turns it into an announcement with the right reason.
+	claim *claim
+	// recentBT is when each Bluetooth device last connected, by MAC.
+	recentBT map[string]time.Time
+	// holding is true during a startup, sleep or resume hold.
+	holding bool
+	audio   probe.Report
+	notes   notifier
 
 	// earcupsKnown is false until the Barracuda dongle pushes a power report.
 	// It does not repeat that report while the state holds, so a daemon that
@@ -83,6 +106,11 @@ type Daemon struct {
 	// earcupsOn is the last report. Byte 13 of report id 0x02.
 	earcupsKnown bool
 	earcupsOn    bool
+
+	// switcher decides where the output goes. See switcher.go.
+	switcher switcher
+	// prober finds out what the sound stack can do. Tests replace it.
+	prober func(context.Context) probe.Report
 
 	// switchMu serializes the multi-step switch sequences. Each one reads the
 	// sink list, decides, and sets a default; two interleaving would leave the
@@ -107,13 +135,28 @@ type Daemon struct {
 }
 
 func New(cfg config.Config, backend audio.Backend, configPath string) *Daemon {
-	return &Daemon{
+	d := &Daemon{
 		cfg:        cfg,
 		backend:    backend,
 		configPath: configPath,
 		startTime:  time.Now(),
+		recentBT:   make(map[string]time.Time),
 		subs:       make(map[*subscriber]struct{}),
+		prober: func(ctx context.Context) probe.Report {
+			return probe.Run(ctx, probe.Exec)
+		},
 	}
+	d.switcher = newPactlSwitcher(d)
+	return d
+}
+
+// sources are the event streams the loop follows. A nil channel is one that
+// is not available on this machine, which select simply never picks.
+type sources struct {
+	bt    <-chan bluetooth.Event
+	audio <-chan audio.Event
+	link  <-chan razer.Event
+	power <-chan power.State
 }
 
 // Run holds the event loop until ctx ends. IPC requests do not come through
@@ -123,52 +166,134 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.setLogFile(d.Config().General.LogFile)
 	defer d.closeLogFile()
 
-	d.infof("daemon started with %s backend", d.backend.Name())
+	d.mu.Lock()
+	if d.notes == nil {
+		n := notify.New(d.debugf)
+		defer n.Close()
+		d.notes = n
+	}
+	d.mu.Unlock()
 
-	d.refreshInitial(ctx)
+	d.infof("daemon started with %s backend, %s switching", d.backend.Name(), d.switcher.name())
+	go d.reprobe(ctx)
 
-	var btEvents <-chan bluetooth.Event
+	var src sources
 	btMon, err := bluetooth.NewMonitor()
 	if err != nil {
 		d.warnf("bluetooth monitoring unavailable: %v", err)
 	} else {
-		d.btMonitor = btMon
 		defer btMon.Close()
-		ch, err := btMon.Subscribe(ctx)
-		if err != nil {
+		if ch, err := btMon.Subscribe(ctx); err != nil {
 			d.warnf("bluetooth monitoring unavailable: %v", err)
 		} else {
-			btEvents = ch
+			src.bt = ch
 			d.infof("bluetooth monitoring active")
 		}
 	}
 
-	audioEvents, err := d.backend.SubscribeEvents(ctx)
-	if err != nil {
-		d.errorf("audio event subscription failed: %v", err)
+	if ch, err := power.Watch(ctx); err != nil {
+		d.debugf("suspend, resume and shutdown will not be noticed: %v", err)
+	} else {
+		src.power = ch
 	}
 
-	d.runEvents(ctx, btEvents, audioEvents, razer.Watch(ctx))
+	src.link = razer.Watch(ctx)
+
+	d.runEvents(ctx, src)
 
 	d.infof("daemon stopping")
 	return ctx.Err()
 }
 
+// reprobe asks what the sound stack can do and records the answer. It runs at
+// startup and after the sound server comes back, which is when an upgrade
+// takes effect.
+func (d *Daemon) reprobe(ctx context.Context) {
+	r := d.prober(ctx)
+	if ctx.Err() != nil {
+		return
+	}
+	d.mu.Lock()
+	d.audio = r
+	d.mu.Unlock()
+	d.infof("audio stack: %s (%s)", r.Summary(), r.Tier())
+	for _, p := range r.Problems {
+		d.warnf("%s", p)
+	}
+	d.changed()
+}
+
 // runEvents owns everything that touches the audio backend on a timer: the
 // Bluetooth handlers, the debounced sink refresh, the retry that waits for a
-// Bluetooth sink to appear, and the config file watch.
-func (d *Daemon) runEvents(ctx context.Context, btEvents <-chan bluetooth.Event, audioEvents <-chan audio.Event, linkEvents <-chan razer.Event) {
+// Bluetooth sink to appear, the holds, the reconnect to the sound server, and
+// the config file watch.
+func (d *Daemon) runEvents(ctx context.Context, src sources) {
 	var (
 		settle <-chan time.Time // a burst of sink changes is still arriving
 		retry  <-chan time.Time // a Bluetooth sink has not turned up yet
+		resub  <-chan time.Time // time to follow pactl subscribe again
+
+		hold      <-chan time.Time // the sink list has been quiet long enough
+		holdEnd   time.Time        // the hold's cap
+		holdQuiet time.Duration    // how long the list must stay quiet
+
+		// away is what logind last announced. Anything but Awake holds every
+		// switch until logind says the machine is back.
+		away       = power.Awake
+		resumeFrom string // the default when the machine started to go away
+
+		backoff     = resubscribeMin
+		streamStart time.Time
+		lostStream  bool
 	)
 
 	armRetry := func() <-chan time.Time {
-		if d.hasPending() {
+		if d.switcher.waiting() {
 			return time.After(pendingRetryInterval)
 		}
 		return nil
 	}
+
+	startHold := func(quiet, max time.Duration) {
+		d.setHolding(true)
+		holdQuiet = quiet
+		holdEnd = time.Now().Add(max)
+		hold = time.After(quiet)
+	}
+	// extendHold restarts the quiet period after a sink came or went, but
+	// never past the cap.
+	extendHold := func() {
+		if hold == nil {
+			return
+		}
+		wait := min(holdQuiet, time.Until(holdEnd))
+		hold = time.After(max(wait, 0))
+	}
+
+	subscribe := func() {
+		ch, err := d.backend.SubscribeEvents(ctx)
+		if err != nil {
+			if !lostStream {
+				d.warnf("cannot follow audio events: %v", err)
+			}
+			lostStream = true
+			resub = time.After(backoff)
+			backoff = min(backoff*2, resubscribeMax)
+			return
+		}
+		src.audio = ch
+		streamStart = time.Now()
+	}
+
+	startHold(holdStable, holdStartupMax)
+	// A stream handed in is followed as it is. Run hands in none, so the
+	// daemon follows the backend's own, and follows it again if it ends.
+	if src.audio == nil {
+		subscribe()
+	} else {
+		streamStart = time.Now()
+	}
+	d.refreshDevices(ctx)
 
 	poll := time.NewTicker(configPollInterval)
 	defer poll.Stop()
@@ -179,27 +304,62 @@ func (d *Daemon) runEvents(ctx context.Context, btEvents <-chan bluetooth.Event,
 		case <-ctx.Done():
 			return
 
-		case ev, ok := <-btEvents:
+		case ev, ok := <-src.bt:
 			if !ok {
-				btEvents = nil
+				src.bt = nil
 				continue
 			}
 			d.handleBluetoothEvent(ctx, ev)
 			retry = armRetry()
 
-		case ev, ok := <-audioEvents:
+		case ev, ok := <-src.audio:
 			if !ok {
-				audioEvents = nil
+				// pactl subscribe exits when the sound server restarts,
+				// which is the standard fix for Bluetooth trouble. Not
+				// following it again left a daemon that still answered
+				// but no longer noticed an unplug.
+				src.audio = nil
+				if ctx.Err() != nil {
+					continue
+				}
+				if time.Since(streamStart) > resubscribeMax {
+					backoff = resubscribeMin
+				}
+				if !lostStream {
+					d.warnf("lost the audio event stream, reconnecting")
+				}
+				lostStream = true
+				resub = time.After(backoff)
+				backoff = min(backoff*2, resubscribeMax)
 				continue
 			}
-			if ev.Type == audio.EventSinkChanged {
+			if lostStream {
+				// The first event on a new stream is the proof that the
+				// server is back.
+				lostStream = false
+				d.infof("audio event stream reconnected")
+				startHold(holdStable, holdStartupMax)
+				d.refreshDevices(ctx)
+				go d.reprobe(ctx)
+			}
+			switch ev.Type {
+			case audio.EventSinkChanged:
 				if settle == nil {
 					settle = time.After(sinkChangeDebounce)
 				}
 				continue
+			case audio.EventSinkAdded, audio.EventSinkRemoved:
+				extendHold()
 			}
 			d.handleAudioEvent(ctx, ev)
 			retry = armRetry()
+
+		case <-resub:
+			// The sink list is read again on the first event the new
+			// stream carries. Reading it here would log a failure on
+			// every attempt while the server is still down.
+			resub = nil
+			subscribe()
 
 		case <-settle:
 			settle = nil
@@ -207,32 +367,97 @@ func (d *Daemon) runEvents(ctx context.Context, btEvents <-chan bluetooth.Event,
 
 		case <-retry:
 			d.refreshSettled(ctx)
-			d.attemptPending(ctx)
+			d.switcher.retry(ctx)
 			retry = armRetry()
 
-		case ev, ok := <-linkEvents:
+		case <-hold:
+			hold = nil
+			if away != power.Awake {
+				continue
+			}
+			d.endHold(ctx, resumeFrom)
+			resumeFrom = ""
+			retry = armRetry()
+
+		case state, ok := <-src.power:
 			if !ok {
-				linkEvents = nil
+				src.power = nil
 				continue
 			}
-			if ev.Err != nil {
-				d.warnf("Barracuda earcup watch: %v", ev.Err)
+			if state != power.Awake {
+				if resumeFrom == "" {
+					resumeFrom = d.defaultID()
+				}
+				away = state
+				d.setHolding(true)
+				hold = nil
+				if state == power.ShuttingDown {
+					d.infof("system shutting down, holding switches")
+				} else {
+					d.infof("system going to sleep, holding switches until it resumes")
+				}
 				continue
 			}
-			if ev.Opened {
-				d.infof("watching Barracuda earcups on %s", ev.Path)
+			if away == power.Awake {
 				continue
 			}
-			if ev.On {
-				d.infof("Barracuda earcups on")
+			if away == power.ShuttingDown {
+				d.infof("shutdown cancelled, waiting for outputs to settle")
 			} else {
-				d.infof("Barracuda earcups off")
+				d.infof("system resumed, waiting for outputs to come back")
 			}
-			d.handleEarcups(ctx, ev.On)
+			away = power.Awake
+			startHold(holdResumeStable, holdResumeMax)
+
+		case ev, ok := <-src.link:
+			if !ok {
+				src.link = nil
+				continue
+			}
+			d.handleLinkEvent(ctx, ev)
 
 		case <-poll.C:
 			lastMod = d.checkConfigFile(lastMod)
 		}
+	}
+}
+
+// endHold lets switching resume and checks the default once, now that the
+// sink list has stopped moving. before is the default from before a sleep or
+// a cancelled shutdown, and empty after a startup hold: nobody needs to be told
+// where audio is playing at login, but after a resume a different output is
+// worth a notification.
+func (d *Daemon) endHold(ctx context.Context, before string) {
+	d.refreshDevices(ctx)
+	d.setHolding(false)
+	d.switcher.settled(ctx, "")
+
+	now := d.defaultID()
+	d.debugf("hold over, playing on %s", d.deviceName(now))
+	if before != "" && now != before {
+		d.announce(deviceByID(d.GetDevices(), now), claim{id: now, reason: reasonResume})
+	}
+}
+
+func (d *Daemon) handleLinkEvent(ctx context.Context, ev razer.Event) {
+	switch {
+	case ev.Err != nil:
+		// Before login the node is root-only, and the watcher retries
+		// every two seconds until the session's access is granted.
+		if time.Since(d.startTime) < quietStart {
+			d.debugf("Barracuda earcup watch: %v", ev.Err)
+		} else {
+			d.warnf("Barracuda earcup watch: %v", ev.Err)
+		}
+	case ev.Opened:
+		d.infof("watching Barracuda earcups on %s", ev.Path)
+	default:
+		if ev.On {
+			d.infof("Barracuda earcups on")
+		} else {
+			d.infof("Barracuda earcups off")
+		}
+		d.handleEarcups(ctx, ev.On)
 	}
 }
 
@@ -284,8 +509,24 @@ func (d *Daemon) applyConfig(cfg config.Config) {
 }
 
 func (d *Daemon) handleBluetoothEvent(ctx context.Context, ev bluetooth.Event) {
+	state := "disconnected"
 	if ev.Connected {
-		d.infof("bluetooth connected: %s (%s)", ev.DeviceName, ev.MACAddress)
+		state = "connected"
+	}
+	// A mouse or keyboard reconnecting after idle used to park a 15 second
+	// wait for an audio sink that would never come, and take the place of a
+	// headset that was waiting for its own.
+	if ev.NotAudio {
+		d.debugf("bluetooth %s: %s (%s), not an audio device", state, ev.DeviceName, ev.MACAddress)
+		return
+	}
+	d.infof("bluetooth %s: %s (%s)", state, ev.DeviceName, ev.MACAddress)
+
+	if ev.Connected {
+		// Read before anything reacts to the connect, so it names the
+		// device the person was listening on.
+		before := d.defaultID()
+		d.noteConnect(ev.MACAddress)
 
 		// BlueZ reports the link before PipeWire publishes the sink, so give
 		// it a head start before going to look.
@@ -293,36 +534,11 @@ func (d *Daemon) handleBluetoothEvent(ctx context.Context, ev bluetooth.Event) {
 			return
 		}
 		d.refreshSettled(ctx)
-
-		if d.switching().OnConnect == "never" {
-			return
-		}
-		if d.trySwitchToBT(ctx, ev.MACAddress, ev.DeviceName) {
-			return
-		}
-
-		d.infof("bluetooth device connected but has no audio sink yet, waiting")
-		d.mu.Lock()
-		d.pending = &pendingBT{
-			mac:    ev.MACAddress,
-			name:   ev.DeviceName,
-			expiry: time.Now().Add(pendingTTL),
-		}
-		d.mu.Unlock()
+		d.switcher.connected(ctx, ev.MACAddress, ev.DeviceName, before)
 		return
 	}
 
-	d.infof("bluetooth disconnected: %s (%s)", ev.DeviceName, ev.MACAddress)
-
-	d.mu.Lock()
-	// Only the device that is being waited on cancels the wait. Clearing it
-	// for any disconnect meant an unrelated headset going away made the daemon
-	// forget the one that was still trying to arrive.
-	if d.pending != nil && strings.EqualFold(d.pending.mac, ev.MACAddress) {
-		d.pending = nil
-	}
-	d.mu.Unlock()
-
+	d.switcher.disconnected(ctx, ev.MACAddress)
 	if !sleepCtx(ctx, disconnectSettle) {
 		return
 	}
@@ -338,7 +554,7 @@ func (d *Daemon) handleAudioEvent(ctx context.Context, ev audio.Event) {
 		before := d.GetDevices()
 		d.refreshSettled(ctx)
 		d.logSinkDiff("sink added", d.GetDevices(), before, ev.DeviceID)
-		d.attemptPending(ctx)
+		d.switcher.retry(ctx)
 
 	case audio.EventSinkRemoved:
 		before := d.GetDevices()
@@ -346,30 +562,16 @@ func (d *Daemon) handleAudioEvent(ctx context.Context, ev audio.Event) {
 		d.logSinkDiff("sink removed", before, d.GetDevices(), ev.DeviceID)
 
 	case audio.EventDefaultChanged:
-		d.mu.RLock()
-		previous := d.lastDefaultID
-		d.mu.RUnlock()
-
-		d.refreshSettled(ctx)
-
-		d.mu.RLock()
-		current := d.lastDefaultID
-		d.mu.RUnlock()
-
-		// Take the claim on the first change event that arrives, whether or
-		// not it matches. One claim covers exactly one observed change, so a
-		// stale one cannot silence an unrelated switch later on.
-		ours := d.takeOwnSwitch(current)
-
-		if current == previous || ours {
-			return
+		// Only the default moved, so one call to read it beats listing
+		// every sink. The full list is read when the new default is a sink
+		// the daemon has not seen yet.
+		was := d.defaultID()
+		if !d.refreshDefault(ctx) {
+			d.refreshDevices(ctx)
 		}
-		if !d.notifications().OnDeviceChange {
-			return
+		if !d.isHolding() {
+			d.switcher.settled(ctx, was)
 		}
-		name := d.deviceName(current)
-		d.infof("default device changed to %s", name)
-		d.notify("Default Device Changed", fmt.Sprintf("Now playing through %s", name))
 	}
 }
 
@@ -404,258 +606,69 @@ func (d *Daemon) logSinkDiff(what string, have, missing []audio.Device, rawID st
 // Off runs the same fallback as a sink disappearing. On follows on_connect,
 // the same rule as a Bluetooth headset connecting.
 func (d *Daemon) handleEarcups(ctx context.Context, on bool) {
+	before := d.defaultID()
 	d.mu.Lock()
 	d.earcupsKnown = true
 	d.earcupsOn = on
 	d.mu.Unlock()
 
 	d.refreshSettled(ctx)
-	if !on || d.switching().OnConnect == "never" {
-		return
-	}
-	if dev := findBarracuda(d.GetDevices()); dev != nil {
-		d.trySwitchTo(ctx, *dev)
-	}
+	d.switcher.earcups(ctx, on, before)
 }
 
-func findBarracuda(devices []audio.Device) *audio.Device {
-	for i := range devices {
-		if razer.IsBarracuda(devices[i]) {
-			return &devices[i]
-		}
-	}
-	return nil
-}
-
-// trySwitchToBT finds the sink belonging to a connected Bluetooth device and
-// makes it the default, honouring on_connect. It reports whether the sink
-// existed, so callers know whether there is any point waiting longer. A switch
-// declined on priority grounds still counts: the sink is there, the answer is
-// just no.
-func (d *Daemon) trySwitchToBT(ctx context.Context, mac, name string) bool {
-	dev := findBTDevice(d.GetDevices(), mac, name)
-	if dev == nil {
-		return false
-	}
-	return d.trySwitchTo(ctx, *dev)
-}
-
-// trySwitchTo makes dev the default, honouring on_connect. A missing device
-// is the caller's problem. A sink that cannot play is refused here so a
-// power-off report cannot be turned around into a switch back onto it.
-func (d *Daemon) trySwitchTo(ctx context.Context, dev audio.Device) bool {
-	d.switchMu.Lock()
-	defer d.switchMu.Unlock()
-
-	if !dev.Available {
-		return false
-	}
-	devices := d.GetDevices()
-
-	if d.switching().OnConnect == "priority" {
-		// The default is already cached from the last refresh, so asking the
-		// backend again would re-list every sink for an answer we hold.
-		if current := deviceByID(devices, d.defaultID()); current != nil {
-			entries := d.priorities()
-			newRank := priority.Rank(dev, entries)
-			currentRank := priority.Rank(*current, entries)
-			if newRank >= currentRank {
-				d.warnf("%s", skipReason(dev, *current, newRank, currentRank, len(entries)))
-				return true
-			}
-		}
-	}
-
-	d.savePrevious()
-	if err := d.setDefault(ctx, dev.ID); err != nil {
-		d.errorf("switch failed: %v", err)
-		return true
-	}
-	d.infof("switched to %s", dev.Name)
-	d.notify("Audio Switched", fmt.Sprintf("Now playing through %s", dev.Name))
-	return true
-}
-
-// skipReason says why a connect did not take the output. "Lower priority" was
-// misleading when neither device was on the list at all, which is the common
-// case for a ranking with one entry in it.
-func skipReason(next, current audio.Device, nextRank, currentRank, entries int) string {
-	if nextRank >= entries && currentRank >= entries {
-		return fmt.Sprintf("skipping switch: neither %s nor %s is on the priority list", next.Name, current.Name)
-	}
-	return fmt.Sprintf("skipping switch: %s is not ranked above %s", next.Name, current.Name)
-}
-
-// fallback picks where the output goes once the device you were listening on
-// has gone away or its port can no longer play. It does nothing when the
-// output is already there, so a second report of the same departure does not
-// announce the switch again.
-func (d *Daemon) fallback(ctx context.Context) {
-	d.switchMu.Lock()
-	defer d.switchMu.Unlock()
-
-	devices := d.GetDevices()
-
-	var target *audio.Device
-	if d.switching().OnDisconnect == "previous" {
-		d.mu.RLock()
-		previousID := d.previousID
-		d.mu.RUnlock()
-
-		for i := range devices {
-			if devices[i].ID == previousID && devices[i].Available {
-				target = &devices[i]
-				break
-			}
-		}
-	}
-	// Either the ranking was asked for, or the device that was playing before
-	// is gone too. Leaving the output wherever the session happened to put it
-	// is the behaviour this daemon exists to avoid.
-	if target == nil {
-		target = priority.Best(devices, d.priorities())
-	}
-	if target == nil {
-		d.warnf("no fallback device available")
-		return
-	}
-	if target.ID == d.defaultID() {
-		return
-	}
-
-	if err := d.setDefault(ctx, target.ID); err != nil {
-		d.errorf("fallback switch failed: %v", err)
-		return
-	}
-	d.infof("fallback to %s", target.Name)
-	d.notify("Audio Fallback", fmt.Sprintf("Switched to %s", target.Name))
-}
-
-// attemptPending retries the switch for a Bluetooth device that connected
-// before its sink existed. It reads the cached device list, so callers refresh
-// first.
-func (d *Daemon) attemptPending(ctx context.Context) {
-	d.mu.RLock()
-	p := d.pending
-	d.mu.RUnlock()
-
-	if p == nil {
-		return
-	}
-	if time.Now().After(p.expiry) {
-		d.clearPending(p)
-		d.warnf("giving up waiting for the audio sink of %s", p.name)
-		return
-	}
-	if d.switching().OnConnect == "never" {
-		d.clearPending(p)
-		return
-	}
-
-	if d.trySwitchToBT(ctx, p.mac, p.name) {
-		d.clearPending(p)
-	}
-}
-
-// setDefault switches the output and records the choice, so the event pactl
-// sends back is recognised as this daemon's own doing. Callers already holding
+// setDefault switches the output and records why, so the change the next sink
+// list read reveals is announced with that reason. Callers already holding
 // switchMu use this; SetDefault takes the lock for them.
-func (d *Daemon) setDefault(ctx context.Context, deviceID string) error {
+func (d *Daemon) setDefault(ctx context.Context, deviceID string, reason switchReason, notify bool) error {
 	d.mu.Lock()
-	d.ownSwitchID = deviceID
+	d.claim = &claim{id: deviceID, reason: reason, notify: notify}
 	d.mu.Unlock()
 
-	if err := d.backend.SetDefaultSink(ctx, deviceID); err != nil {
-		d.mu.Lock()
-		d.ownSwitchID = ""
-		d.mu.Unlock()
-		return err
+	err := d.backend.SetDefaultSink(ctx, deviceID)
+	if err == nil {
+		d.refreshDevices(ctx)
 	}
 
-	d.refreshDevices(ctx)
-	return nil
+	// A claim the read did not use is stale: the set failed, or the device
+	// was already the default and nothing changed.
+	d.mu.Lock()
+	if d.claim != nil && d.claim.id == deviceID {
+		d.claim = nil
+	}
+	d.mu.Unlock()
+	return err
 }
 
-// SetDefault is the manual switch behind the UI. It waits on the same lock the
-// automatic switches use, so a keypress and a Bluetooth connect landing at the
-// same moment cannot leave the output somewhere neither of them picked.
-func (d *Daemon) SetDefault(ctx context.Context, deviceID string) error {
+// SetDefault is the manual switch behind the UI and the CLI. It waits on the
+// same lock the automatic switches use, so a keypress and a Bluetooth connect
+// landing at the same moment cannot leave the output somewhere neither of
+// them picked. notify asks for a desktop notification, which a hotkey wants
+// and the terminal UI does not.
+func (d *Daemon) SetDefault(ctx context.Context, deviceID string, notify bool) error {
 	d.switchMu.Lock()
 	defer d.switchMu.Unlock()
-	return d.setDefault(ctx, deviceID)
+	return d.setDefault(ctx, deviceID, reasonManual, notify)
 }
 
-// takeOwnSwitch reports whether id is the change this daemon just made, and
-// clears the claim either way.
-func (d *Daemon) takeOwnSwitch(id string) bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	claimed := d.ownSwitchID
-	d.ownSwitchID = ""
-	return id != "" && id == claimed
-}
-
-// hasDevice reports whether id is still in the sink list.
-func (d *Daemon) hasDevice(id string) bool {
-	if id == "" {
-		return false
-	}
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	for _, dev := range d.devices {
-		if dev.ID == id {
-			return true
-		}
-	}
-	return false
-}
-
-func (d *Daemon) hasPending() bool {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.pending != nil
-}
-
-// clearPending drops p only if it is still the attempt in flight, so a newer
-// connection is not thrown away by an older one finishing late.
-func (d *Daemon) clearPending(p *pendingBT) {
-	d.mu.Lock()
-	if d.pending == p {
-		d.pending = nil
-	}
-	d.mu.Unlock()
-}
-
-// refreshInitial loads the sink list at startup and moves off a default
-// that cannot play. refreshSettled is the wrong call here. It compares
-// against the default from before the read, and at startup that is empty,
-// so a port that is already down would be left in place.
+// refreshInitial loads the sink list and moves off a default that cannot
+// play, comparing against nothing earlier. It is what the end of a hold does.
 func (d *Daemon) refreshInitial(ctx context.Context) {
 	d.refreshDevices(ctx)
-	d.fallbackIfUnusable(ctx, d.defaultID())
+	d.switcher.settled(ctx, "")
 }
 
-// refreshSettled re-reads the sink list and moves the output off whatever
-// was default when that sink is gone or its port can no longer play.
-// setDefault calls refreshDevices instead. It already holds switchMu, and
-// falling back from inside it would lock that mutex twice.
+// refreshSettled re-reads the sink list and lets the switcher move the output
+// off whatever was default when that sink is gone or can no longer play.
+// During a hold it only reads. setDefault calls refreshDevices instead: it
+// already holds switchMu, and falling back from inside it would lock that
+// mutex twice.
 func (d *Daemon) refreshSettled(ctx context.Context) {
 	was := d.defaultID()
 	d.refreshDevices(ctx)
-	d.fallbackIfUnusable(ctx, was)
-}
-
-// fallbackIfUnusable runs fallback when id is missing or not available.
-// Callers pass the sink that was playing. One that is still listed and can
-// play is left alone, so some other headset leaving does not move the output.
-func (d *Daemon) fallbackIfUnusable(ctx context.Context, id string) {
-	if id == "" {
+	if d.isHolding() {
 		return
 	}
-	if dev := deviceByID(d.GetDevices(), id); dev != nil && dev.Available {
-		return
-	}
-	d.fallback(ctx)
+	d.switcher.settled(ctx, was)
 }
 
 func (d *Daemon) refreshDevices(ctx context.Context) {
@@ -664,6 +677,32 @@ func (d *Daemon) refreshDevices(ctx context.Context) {
 		d.errorf("refreshing devices failed: %v", err)
 		return
 	}
+	d.storeDevices(devices)
+}
+
+// refreshDefault reads only the default sink's name and updates the cached
+// list to match. It reports false when that name is not in the list, which
+// means a full read is needed.
+func (d *Daemon) refreshDefault(ctx context.Context) bool {
+	name, err := d.backend.DefaultSinkName(ctx)
+	if err != nil {
+		return false
+	}
+	devices := d.GetDevices()
+	if deviceByID(devices, name) == nil {
+		return false
+	}
+	for i := range devices {
+		devices[i].IsDefault = devices[i].ID == name
+	}
+	d.storeDevices(devices)
+	return true
+}
+
+// storeDevices installs a fresh sink list. Subscribers are only woken when
+// something in it changed: pactl reports a change on every sink for reasons
+// that alter nothing the UI draws, and each wake built and sent a snapshot.
+func (d *Daemon) storeDevices(devices []audio.Device) {
 	d.mu.Lock()
 	// pactl still lists the Barracuda receiver when the earcups are off.
 	// The link report is the only signal, so a known-off headset is taken
@@ -675,24 +714,41 @@ func (d *Daemon) refreshDevices(ctx context.Context) {
 			}
 		}
 	}
+	changed := !slices.Equal(d.devices, devices)
 	d.devices = devices
+
+	newDefault := ""
 	for _, dev := range devices {
 		if dev.IsDefault {
-			d.lastDefaultID = dev.ID
+			newDefault = dev.ID
 			break
 		}
 	}
+	// The first reading is where things are, not a change to announce.
+	moved := newDefault != "" && d.lastDefaultID != "" && newDefault != d.lastDefaultID
+	if newDefault != "" {
+		d.lastDefaultID = newDefault
+	}
 	d.mu.Unlock()
-	d.changed()
+
+	if moved {
+		d.defaultMoved(newDefault)
+	}
+	if changed {
+		d.changed()
+	}
 }
 
-// savePrevious remembers where the output was before a switch, for the
-// previous fallback mode. The cached default is what the last refresh saw, and
-// every caller refreshes first.
-func (d *Daemon) savePrevious() {
+func (d *Daemon) setHolding(v bool) {
 	d.mu.Lock()
-	d.previousID = d.lastDefaultID
+	d.holding = v
 	d.mu.Unlock()
+}
+
+func (d *Daemon) isHolding() bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.holding
 }
 
 func (d *Daemon) GetDevices() []audio.Device {
@@ -768,52 +824,12 @@ func copyConfig(cfg config.Config) config.Config {
 	return out
 }
 
-// notify raises a desktop notification. The child is waited on in the
-// background: an unreaped notify-send leaves a zombie for the life of the
-// daemon, and this runs on every switch.
-func (d *Daemon) notify(title, body string) {
-	if !d.notifications().Enabled {
-		return
-	}
-	cmd := exec.Command("notify-send", "-a", "poweraudio", "-i", "audio-headphones", title, body)
-	if err := cmd.Start(); err != nil {
-		return
-	}
-	go func() { _ = cmd.Wait() }()
-}
-
 func deviceByID(devices []audio.Device, id string) *audio.Device {
 	if id == "" {
 		return nil
 	}
 	for i := range devices {
 		if devices[i].ID == id {
-			return &devices[i]
-		}
-	}
-	return nil
-}
-
-// findBTDevice matches a BlueZ device against the sink list. MAC first, since
-// two headsets can share a model name, then the alias for backends that do not
-// report a MAC.
-func findBTDevice(devices []audio.Device, mac, name string) *audio.Device {
-	if mac != "" {
-		for i := range devices {
-			if devices[i].Type == audio.DeviceTypeBluetooth &&
-				devices[i].MACAddress != "" &&
-				strings.EqualFold(devices[i].MACAddress, mac) {
-				return &devices[i]
-			}
-		}
-	}
-	if name == "" {
-		return nil
-	}
-	needle := strings.ToLower(name)
-	for i := range devices {
-		if devices[i].Type == audio.DeviceTypeBluetooth &&
-			strings.Contains(strings.ToLower(devices[i].Name), needle) {
 			return &devices[i]
 		}
 	}

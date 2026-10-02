@@ -55,6 +55,15 @@ func renderStatus(snap *ipc.Snapshot, now time.Time) string {
 		fmt.Fprintf(tw, "default\tnone\n")
 	}
 	fmt.Fprintf(tw, "backend\t%s\n", snap.Status.Backend)
+	if !snap.Status.Audio.ProbedAt.IsZero() {
+		fmt.Fprintf(tw, "audio\t%s\n", snap.Status.Audio.Summary())
+	}
+	if snap.Status.Switching != "" {
+		fmt.Fprintf(tw, "switching\t%s\n", snap.Status.Switching)
+	}
+	for _, problem := range snap.Status.Audio.Problems {
+		fmt.Fprintf(tw, "warning\t%s\n", problem)
+	}
 	fmt.Fprintf(tw, "config\t%s\n", snap.Status.ConfigPath)
 	fmt.Fprintf(tw, "uptime\t%s\n", uptime(snap.Status.StartedAt, now))
 	tw.Flush()

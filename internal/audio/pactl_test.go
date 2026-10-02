@@ -581,3 +581,31 @@ func TestDetectRejectsUnknownBackend(t *testing.T) {
 		t.Error("Detect should reject a backend name it does not know")
 	}
 }
+
+func TestVirtualSinks(t *testing.T) {
+	cases := []struct {
+		name string
+		sink pactlSink
+		want bool
+	}{
+		{"placeholder", pactlSink{Name: PlaceholderID}, true},
+		{"PipeWire null sink", pactlSink{Name: "easyeffects_sink", Properties: map[string]string{"factory.name": "support.null-audio-sink"}}, true},
+		{"node.virtual", pactlSink{Name: "combined", Properties: map[string]string{"node.virtual": "true"}}, true},
+		{"PulseAudio null sink", pactlSink{Name: "null", Properties: map[string]string{"device.class": "abstract"}}, true},
+		{"filter chain", pactlSink{Name: "effect_input.eq", Properties: map[string]string{"device.class": "filter"}}, true},
+		{"ALSA card", pactlSink{Name: "alsa_output.pci-0000_0e_00.6.analog-stereo", Properties: map[string]string{
+			"device.class": "sound", "factory.name": "api.alsa.pcm.sink", "device.api": "alsa"}}, false},
+		{"no properties at all", pactlSink{Name: "alsa_output.usb"}, false},
+	}
+	for _, c := range cases {
+		if got := isVirtual(c.sink); got != c.want {
+			t.Errorf("%s: isVirtual = %v, want %v", c.name, got, c.want)
+		}
+	}
+	if !(Device{ID: PlaceholderID, Available: true}).IsPlaceholder() {
+		t.Error("the placeholder id was not recognised")
+	}
+	if (Device{ID: PlaceholderID, Available: true}).Usable() {
+		t.Error("the placeholder counted as usable")
+	}
+}

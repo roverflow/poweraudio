@@ -26,7 +26,7 @@ func (d *Daemon) Handle(ctx context.Context, req ipc.Request) ipc.Response {
 		if err := json.Unmarshal(req.Params, &params); err != nil {
 			return ipc.ErrorResponse("invalid params: " + err.Error())
 		}
-		if err := d.SetDefault(ctx, params.DeviceID); err != nil {
+		if err := d.SetDefault(ctx, params.DeviceID, params.Notify); err != nil {
 			d.errorf("manual switch failed: %v", err)
 			return ipc.ErrorResponse(err.Error())
 		}
@@ -111,6 +111,8 @@ func (d *Daemon) Snapshot() ipc.Snapshot {
 			Backend:    d.backend.Name(),
 			ConfigPath: config.ResolvePath(d.configPath),
 			StartedAt:  d.startTime,
+			Switching:  d.switcher.name(),
+			Audio:      d.audio,
 		},
 		Events: events,
 		Config: copyConfig(d.cfg),

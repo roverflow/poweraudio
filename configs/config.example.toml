@@ -37,10 +37,13 @@ on_disconnect = "priority"
 switch_delay_ms = 500
 
 [notifications]
-# Desktop notifications through notify-send.
+# Desktop notifications, sent to the desktop's notification server over D-Bus.
+# One notification at a time, replaced rather than stacked, and none during
+# login or while the machine sleeps.
 enabled = true
 
-# Notify when something other than the daemon changes the default device.
+# Notify when something other than poweraudio changes the default device,
+# such as the desktop's sound settings.
 on_device_change = true
 
 [daemon]

@@ -114,3 +114,34 @@ func TestRank(t *testing.T) {
 		t.Errorf("unlisted rank = %d, want %d", got, len(priorities))
 	}
 }
+
+// "Dummy Output" is what is left when every real sink has gone, as it is for a
+// moment on the way into suspend. Picking it failed with "Not supported".
+func TestBestNeverPicksThePlaceholder(t *testing.T) {
+	dummy := audio.Device{ID: audio.PlaceholderID, Name: "Dummy Output", Available: true, Virtual: true}
+
+	if got := Best([]audio.Device{dummy}, nil); got != nil {
+		t.Errorf("Best picked %q with only the placeholder left", got.ID)
+	}
+	ranked := []config.PriorityEntry{{Match: "Dummy"}}
+	if got := Best([]audio.Device{dummy}, ranked); got != nil {
+		t.Errorf("Best picked the placeholder because an entry named it")
+	}
+}
+
+func TestBestSkipsUnrankedVirtualSinks(t *testing.T) {
+	devices := []audio.Device{
+		{ID: "easyeffects_sink", Name: "Easy Effects Sink", Available: true, Virtual: true},
+		{ID: "hdmi", Name: "HDMI", Available: true},
+	}
+	if got := Best(devices, nil); got == nil || got.ID != "hdmi" {
+		t.Errorf("last resort = %v, want the hardware sink over the virtual one", got)
+	}
+	if got := Best(devices[:1], nil); got != nil {
+		t.Errorf("last resort picked a virtual sink with no hardware left: %v", got.ID)
+	}
+	ranked := []config.PriorityEntry{{Match: "Easy Effects"}}
+	if got := Best(devices, ranked); got == nil || got.ID != "easyeffects_sink" {
+		t.Errorf("a ranked virtual sink was skipped: %v", got)
+	}
+}

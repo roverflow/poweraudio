@@ -239,6 +239,16 @@ func TestRunSendsTheRightRequests(t *testing.T) {
 			calls: []string{"snapshot", "set_default alsa_output.pci-0000_00_1f.3.analog-stereo"},
 		},
 		{
+			name:  "next from a hotkey asks for a notification",
+			args:  []string{"next", "--notify"},
+			calls: []string{"snapshot", "set_default alsa_output.pci-0000_00_1f.3.analog-stereo notify"},
+		},
+		{
+			name:  "set asks for a notification",
+			args:  []string{"set", "--notify", "jbl"},
+			calls: []string{"snapshot", "set_default bluez_output.3C_B0_ED_3A_2C_42.1 notify"},
+		},
+		{
 			name:  "volume acts on the default device",
 			args:  []string{"volume", "+5"},
 			calls: []string{"snapshot", "set_volume bluez_output.3C_B0_ED_3A_2C_42.1 85"},

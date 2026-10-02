@@ -1,0 +1,10 @@
+[
+ {
+  "index": 3,
+  "driver": "protocol-native.c",
+  "properties": {
+   "application.name": "pactl",
+   "application.process.binary": "pactl"
+  }
+ }
+]
