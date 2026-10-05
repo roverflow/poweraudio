@@ -10,6 +10,7 @@ import (
 	"github.com/roverflow/poweraudio/internal/audio"
 	"github.com/roverflow/poweraudio/internal/config"
 	"github.com/roverflow/poweraudio/internal/ipc"
+	"github.com/roverflow/poweraudio/internal/version"
 )
 
 // Handle answers one request. The server calls it on the connection's own
@@ -108,6 +109,7 @@ func (d *Daemon) Snapshot() ipc.Snapshot {
 	return ipc.Snapshot{
 		Devices: devices,
 		Status: ipc.StatusData{
+			Version:    version.String(),
 			Backend:    d.backend.Name(),
 			ConfigPath: config.ResolvePath(d.configPath),
 			StartedAt:  d.startTime,

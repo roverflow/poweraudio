@@ -120,6 +120,9 @@ func (m statusModel) View() string {
 	fields := statusShowsFields(h)
 
 	title := "  " + styleTitle.Render("Daemon Status")
+	if v := m.status.Version; v != "" {
+		title += styleMuted.Render("  " + v)
+	}
 	if !fields {
 		title += styleMuted.Render("   " + m.audioLine())
 	}

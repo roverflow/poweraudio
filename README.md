@@ -35,6 +35,10 @@ All parts run as your user. No part needs root access.
    cd poweraudio
    ```
 
+   To install a release instead of the newest code, check out its tag, for
+   example `git checkout v0.4.1`. [CHANGELOG.md](CHANGELOG.md) lists the
+   releases.
+
 2. Build and install the binary and the service file:
 
    ```bash
@@ -53,6 +57,8 @@ All parts run as your user. No part needs root access.
    ```bash
    poweraudio status
    ```
+
+   The `version` line shows the version of the daemon.
 
 NOTE: The Razer Barracuda X receiver needs a udev rule. `make install` installs
 it if sudo is available without a password. If not, install it manually:
@@ -159,6 +165,39 @@ notifications at login or while the computer sleeps.
 
 To see the log, run `journalctl --user -u poweraudio -f`.
 
+## Update
+
+```bash
+git pull
+make install
+systemctl --user restart poweraudio
+```
+
+If you do not restart the service, the old daemon continues to run.
+`poweraudio status` then shows a warning that the daemon and the command are
+different versions.
+
+## Versions
+
+poweraudio uses version numbers in the form x.y.z. Each release has a git tag
+`vx.y.z`. [CHANGELOG.md](CHANGELOG.md) tells what each release changed. To see
+the version of the binary, run `poweraudio --version`.
+
+A build that is not a release has a longer version. `0.4.1-3-gabc1234` is three
+commits after 0.4.1. `-dirty` means that the build included changes that were
+not committed.
+
+Before 1.0.0, the numbers have these meanings:
+
+- A change to y, for example 0.4.1 to 0.5.0, adds features or changes
+  behavior. The behavior can be different for the configuration file, the
+  commands, the `--json` output or the exit codes. The changelog tells what
+  to do.
+- A change to z, for example 0.4.0 to 0.4.1, only fixes bugs.
+
+After 1.0.0, only a change to x can make an incompatible change to the
+configuration file, the commands, the `--json` output or the exit codes.
+
 ## Remove
 
 ```bash
@@ -175,6 +214,17 @@ go test -race ./...
 ```
 
 The tests do not need an audio server.
+
+Add each change to the "Unreleased" section of [CHANGELOG.md](CHANGELOG.md) in
+the same pull request. To make a release, run the release script on `main`:
+
+```bash
+scripts/release.sh 0.5.0
+git push origin main v0.5.0
+```
+
+The script runs the tests, moves the "Unreleased" notes to a section for the
+new version and commits the change. Then it creates the tag. It does not push.
 
 ## License
 

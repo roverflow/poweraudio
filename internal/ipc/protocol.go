@@ -59,6 +59,10 @@ type EventLog struct {
 }
 
 type StatusData struct {
+	// Version is the daemon's release, such as "0.4.1". It can differ from
+	// the client's after an upgrade that did not restart the service. A
+	// daemon that predates the field leaves it empty.
+	Version    string    `json:"version,omitempty"`
 	Backend    string    `json:"backend"`
 	ConfigPath string    `json:"config_path"`
 	StartedAt  time.Time `json:"started_at"`

@@ -17,9 +17,8 @@ import (
 	"github.com/roverflow/poweraudio/internal/daemon"
 	"github.com/roverflow/poweraudio/internal/ipc"
 	"github.com/roverflow/poweraudio/internal/tui"
+	"github.com/roverflow/poweraudio/internal/version"
 )
-
-var version = "dev"
 
 func main() {
 	daemonMode := flag.Bool("daemon", false, "Run as background daemon")
@@ -29,7 +28,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Println("poweraudio", version)
+		fmt.Println("poweraudio", version.String())
 		return
 	}
 
@@ -73,7 +72,7 @@ func runDaemon(cfg config.Config, configPath string) error {
 	if err != nil {
 		return fmt.Errorf("audio backend: %w", err)
 	}
-	log.Printf("using %s backend", backend.Name())
+	log.Printf("poweraudio %s using %s backend", version.String(), backend.Name())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

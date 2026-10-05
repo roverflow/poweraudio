@@ -12,6 +12,7 @@ import (
 
 	"github.com/roverflow/poweraudio/internal/audio"
 	"github.com/roverflow/poweraudio/internal/ipc"
+	"github.com/roverflow/poweraudio/internal/version"
 )
 
 func cmdList(args []string, client Client, out io.Writer) error {
@@ -60,7 +61,7 @@ func cmdStatus(args []string, client Client, out io.Writer) error {
 		return writeJSON(out, snap)
 	}
 
-	_, err = io.WriteString(out, renderStatus(snap, time.Now()))
+	_, err = io.WriteString(out, renderStatus(snap, version.String(), time.Now()))
 	return err
 }
 

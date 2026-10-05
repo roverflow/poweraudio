@@ -42,10 +42,11 @@ func renderList(snap *ipc.Snapshot) string {
 	return buf.String()
 }
 
-// renderStatus is the daemon at a glance followed by the tail of its log. now
-// is a parameter rather than a call to time.Now so the uptime line is worth
+// renderStatus is the daemon at a glance followed by the tail of its log.
+// client is this command's own version, to compare with the daemon's. now is
+// a parameter rather than a call to time.Now so the uptime line is worth
 // testing.
-func renderStatus(snap *ipc.Snapshot, now time.Time) string {
+func renderStatus(snap *ipc.Snapshot, client string, now time.Time) string {
 	var buf bytes.Buffer
 
 	tw := newTable(&buf)
@@ -64,7 +65,15 @@ func renderStatus(snap *ipc.Snapshot, now time.Time) string {
 	for _, problem := range snap.Status.Audio.Problems {
 		fmt.Fprintf(tw, "warning\t%s\n", problem)
 	}
+	if daemon := snap.Status.Version; daemon != "" && client != "" && daemon != client {
+		// `make install` replaces the binary but leaves the old daemon
+		// running, so the fix just installed is not the one in effect.
+		fmt.Fprintf(tw, "warning\tthe daemon is %s and this command is %s, run: systemctl --user restart poweraudio\n", daemon, client)
+	}
 	fmt.Fprintf(tw, "config\t%s\n", snap.Status.ConfigPath)
+	if snap.Status.Version != "" {
+		fmt.Fprintf(tw, "version\t%s\n", snap.Status.Version)
+	}
 	fmt.Fprintf(tw, "uptime\t%s\n", uptime(snap.Status.StartedAt, now))
 	tw.Flush()
 

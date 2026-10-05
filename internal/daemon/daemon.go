@@ -21,6 +21,7 @@ import (
 	"github.com/roverflow/poweraudio/internal/power"
 	"github.com/roverflow/poweraudio/internal/probe"
 	"github.com/roverflow/poweraudio/internal/razer"
+	"github.com/roverflow/poweraudio/internal/version"
 )
 
 const (
@@ -185,7 +186,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	d.mu.Unlock()
 
-	d.infof("daemon started with %s backend, %s switching", d.backend.Name(), d.switcher.name())
+	d.infof("daemon %s started with %s backend, %s switching", version.String(), d.backend.Name(), d.switcher.name())
 	go d.reprobe(ctx)
 
 	var src sources

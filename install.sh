@@ -38,6 +38,14 @@ get_current_version() {
     fi
 }
 
+VERSION_VAR=github.com/roverflow/poweraudio/internal/version.stamped
+
+# describe_version names the build after the nearest vX.Y.Z tag, the same way
+# the Makefile does, and prints nothing when there is no tag to go by.
+describe_version() {
+    git describe --tags --match 'v[0-9]*' --dirty 2>/dev/null | sed 's/^v//'
+}
+
 # Runs inside a command substitution, so it must not register the cleanup trap
 # itself. That subshell exits the moment this function returns, and an EXIT
 # trap set here fired then, deleting the build before the caller could install
@@ -46,15 +54,18 @@ build_in_tmpdir() {
     local src="${WORKDIR}/poweraudio"
 
     info "Cloning repository..."
-    git clone --depth 1 "$REPO" "$src" >&2 2>&1
+    # A blobless clone keeps every commit and tag, which the version needs,
+    # and fetches file contents only for the commit that gets built. A
+    # --depth 1 clone had no tags, so the binary reported a bare commit hash.
+    git clone --filter=blob:none "$REPO" "$src" >&2 2>&1
     ok "Cloned"
 
     info "Building..."
     cd "$src"
     local ver
-    ver=$(git describe --tags --always 2>/dev/null || echo "dev")
-    go build -ldflags "-X main.version=${ver}" -o poweraudio ./cmd/poweraudio
-    ok "Built version ${ver}"
+    ver=$(describe_version)
+    go build -ldflags "-X ${VERSION_VAR}=${ver}" -o poweraudio ./cmd/poweraudio
+    ok "Built version ${ver:-dev}"
 
     printf "%s" "$src"
 }
@@ -66,9 +77,9 @@ build_in_place() {
 
     info "Building..."
     local ver
-    ver=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
-    go build -ldflags "-X main.version=${ver}" -o poweraudio ./cmd/poweraudio
-    ok "Built version ${ver}"
+    ver=$(describe_version)
+    go build -ldflags "-X ${VERSION_VAR}=${ver}" -o poweraudio ./cmd/poweraudio
+    ok "Built version ${ver:-dev}"
 
     printf "%s" "$(pwd)"
 }

@@ -42,7 +42,7 @@ Sep 18 09:01:00  info  bluetooth connected: JBL Tune 520BT
 Sep 18 09:01:30  warn  waiting for the audio sink of JBL Tune 520BT
 `
 
-	if got := renderStatus(&snap, started.Add(2*time.Hour+3*time.Minute)); got != want {
+	if got := renderStatus(&snap, "", started.Add(2*time.Hour+3*time.Minute)); got != want {
 		t.Errorf("renderStatus =\n%q\nwant\n%q", got, want)
 	}
 }
@@ -65,8 +65,41 @@ warning    pw-metadata is missing
 config     /home/u/.config/poweraudio/config.toml
 uptime     2h 3m
 `
-	if got := renderStatus(&snap, started.Add(2*time.Hour+3*time.Minute)); got != want {
+	if got := renderStatus(&snap, "", started.Add(2*time.Hour+3*time.Minute)); got != want {
 		t.Errorf("renderStatus =\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestRenderStatusShowsTheVersion(t *testing.T) {
+	snap := fixture()
+	snap.Events = nil
+	snap.Status.Version = "0.4.1"
+	want := `default  JBL Tune 520BT  80%
+backend  pipewire
+config   /home/u/.config/poweraudio/config.toml
+version  0.4.1
+uptime   2h 3m
+`
+	if got := renderStatus(&snap, "0.4.1", started.Add(2*time.Hour+3*time.Minute)); got != want {
+		t.Errorf("renderStatus =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// make install replaces the binary and leaves the old daemon running.
+func TestRenderStatusWarnsWhenTheDaemonIsAnotherVersion(t *testing.T) {
+	snap := fixture()
+	snap.Events = nil
+	snap.Status.Version = "0.4.0"
+	got := renderStatus(&snap, "0.4.1", started)
+	want := "warning  the daemon is 0.4.0 and this command is 0.4.1, run: systemctl --user restart poweraudio\n"
+	if !strings.Contains(got, want) {
+		t.Errorf("renderStatus =\n%s\nwant a line\n%s", got, want)
+	}
+
+	// A daemon from before the field existed says nothing either way.
+	snap.Status.Version = ""
+	if got := renderStatus(&snap, "0.4.1", started); strings.Contains(got, "version") {
+		t.Errorf("renderStatus = %q, want no version line for a daemon that did not report one", got)
 	}
 }
 
@@ -76,7 +109,7 @@ func TestRenderStatusWithoutADefaultOrEvents(t *testing.T) {
 	snap.Events = nil
 	snap.Status.StartedAt = time.Time{}
 
-	got := renderStatus(&snap, started)
+	got := renderStatus(&snap, "", started)
 	if !strings.Contains(got, "default  none") {
 		t.Errorf("renderStatus = %q, want it to report no default device", got)
 	}
@@ -99,7 +132,7 @@ func TestRenderStatusShowsTheLastTenEvents(t *testing.T) {
 		})
 	}
 
-	got := renderStatus(&snap, started)
+	got := renderStatus(&snap, "", started)
 	if strings.Contains(got, "event o") {
 		t.Errorf("renderStatus = %q, want the fifteenth event dropped", got)
 	}

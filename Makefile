@@ -1,9 +1,12 @@
 BINARY = poweraudio
-VERSION = $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-LDFLAGS = -ldflags "-X main.version=$(VERSION)"
+# The version comes from the nearest vX.Y.Z tag: "0.4.1" on the tag itself,
+# "0.4.1-3-gabc1234" three commits past it, "-dirty" with uncommitted changes.
+# Without tags it is left empty and the binary falls back to what Go recorded.
+VERSION = $(shell git describe --tags --match 'v[0-9]*' --dirty 2>/dev/null | sed 's/^v//')
+LDFLAGS = -ldflags "-X github.com/roverflow/poweraudio/internal/version.stamped=$(VERSION)"
 PREFIX ?= $(HOME)/.local
 
-.PHONY: build install uninstall purge clean
+.PHONY: build install uninstall purge clean version
 
 build:
 	go build $(LDFLAGS) -o $(BINARY) ./cmd/poweraudio
@@ -39,3 +42,6 @@ purge: uninstall
 
 clean:
 	rm -f $(BINARY)
+
+version:
+	@echo $(or $(VERSION),dev)
