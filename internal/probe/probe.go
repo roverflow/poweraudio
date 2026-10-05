@@ -1,15 +1,6 @@
-// Package probe works out which audio stack the daemon is running on, so the
-// rest of poweraudio can pick the switching engine and the settings that this
-// machine actually supports.
-//
-// It asks what the running programs can do rather than trusting a version
-// number alone. A package upgrade leaves the old WirePlumber running until the
-// next restart, and several of its settings arrived partway through 0.5, so
-// the live settings list is read from WirePlumber itself.
-//
-// Everything here is three short subprocess calls, about 15ms on a desktop.
-// pw-dump would answer the same questions but prints the whole PipeWire graph,
-// roughly half a megabyte, so it is not used.
+// Package probe works out which audio stack and WirePlumber settings this
+// machine has. It reads live settings from WirePlumber itself, since a
+// package upgrade leaves the old version running until a restart.
 package probe
 
 import (
@@ -36,24 +27,19 @@ const (
 	ManagerMediaSession = "pipewire-media-session"
 )
 
-// Tier is how much of poweraudio a machine can use. It is derived from a
-// Report rather than stored, so a report decoded from an older daemon still
-// answers.
+// Tier is how much of poweraudio a machine can use, derived from a Report.
 type Tier string
 
 const (
 	// TierUnknown means no sound server answered.
 	TierUnknown Tier = "unknown"
-	// TierPulseAudio is plain PulseAudio, driven through pactl.
+	// TierPulseAudio is plain PulseAudio.
 	TierPulseAudio Tier = "pulseaudio"
-	// TierPipeWire is PipeWire with no session manager poweraudio knows,
-	// which in practice means pipewire-media-session.
+	// TierPipeWire is PipeWire without WirePlumber.
 	TierPipeWire Tier = "pipewire"
-	// TierWirePlumber04 is WirePlumber 0.4: Lua config, no hooks for the
-	// default device.
+	// TierWirePlumber04 has Lua config and no default-device hooks.
 	TierWirePlumber04 Tier = "wireplumber-0.4"
-	// TierWirePlumber05 is WirePlumber 0.5 or newer: SPA-JSON config, live
-	// settings, and event hooks.
+	// TierWirePlumber05 has SPA-JSON config, live settings and event hooks.
 	TierWirePlumber05 Tier = "wireplumber-0.5"
 )
 
@@ -64,18 +50,12 @@ type Report struct {
 	Manager        string `json:"manager,omitempty"`
 	ManagerVersion string `json:"manager_version,omitempty"`
 
-	// Settings are WirePlumber's live settings and their values, read from
-	// its sm-settings metadata. Only 0.5 publishes them, and the keys present
-	// say which settings this version has.
+	// Settings come from sm-settings metadata, which only WirePlumber 0.5 has.
 	Settings map[string]string `json:"settings,omitempty"`
 
-	// PactlJSON is whether pactl can print JSON, which the backend needs.
-	// pactl gained --format in PulseAudio 16, and Ubuntu 22.04's 15.99.1
-	// already has it.
+	// PactlJSON reports pactl --format support, from PulseAudio 15.99.1 on.
 	PactlJSON bool `json:"pactl_json"`
 
-	// Problems are things the probe tried and could not do, worded for the
-	// status screen.
 	Problems []string `json:"problems,omitempty"`
 
 	ProbedAt time.Time `json:"probed_at"`
@@ -98,9 +78,7 @@ func (r Report) Tier() Tier {
 	}
 }
 
-// wirePlumber05 decides the WirePlumber generation. The version decides when
-// it is there; the settings metadata, which only 0.5 creates, decides when it
-// is not.
+// Without a version, settings metadata decides. Only 0.5 creates it.
 func wirePlumber05(r Report) bool {
 	if major, minor, ok := majorMinor(r.ManagerVersion); ok {
 		return major > 0 || minor >= 5
@@ -108,8 +86,7 @@ func wirePlumber05(r Report) bool {
 	return len(r.Settings) > 0
 }
 
-// HasSetting reports whether this WirePlumber knows a live setting, so a
-// toggle is only offered where flipping it does something.
+// HasSetting reports whether this WirePlumber knows a live setting.
 func (r Report) HasSetting(name string) bool {
 	_, ok := r.Settings[name]
 	return ok
@@ -137,16 +114,12 @@ func join(name, version string) string {
 	return name + " " + version
 }
 
-// Runner runs one command and returns its standard output. Tests replace it
-// with captured output.
+// Runner runs one command and returns its standard output.
 type Runner func(ctx context.Context, name string, args ...string) ([]byte, error)
 
-// commandTimeout bounds each call. At login pipewire-pulse can take a moment
-// to answer, but a probe that hangs would hold up whatever asked for it.
 const commandTimeout = 3 * time.Second
 
-// Exec is the Runner that starts real processes. LC_ALL=C keeps pactl's
-// labels in English, since its text output is translated.
+// Exec runs real processes. LC_ALL=C keeps pactl's labels untranslated.
 func Exec(ctx context.Context, name string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
@@ -155,8 +128,7 @@ func Exec(ctx context.Context, name string, args ...string) ([]byte, error) {
 	return cmd.Output()
 }
 
-// Run probes the machine. It never fails: what it could not find is left
-// empty and noted in Problems.
+// Run probes the machine. Anything it could not find goes in Problems.
 func Run(ctx context.Context, run Runner) Report {
 	r := Report{ProbedAt: time.Now()}
 
@@ -189,10 +161,8 @@ func Run(ctx context.Context, run Runner) Report {
 	return r
 }
 
-// parseServer reads the Server Name and Server Version lines of `pactl info`.
-// pipewire-pulse answers "PulseAudio (on PipeWire 1.6.9)" and a version of
-// 15.0.0 that only describes the protocol it speaks, so the PipeWire version
-// is taken from the name instead.
+// pipewire-pulse reports its protocol version, 15.0.0, so the PipeWire
+// version comes from "PulseAudio (on PipeWire 1.6.9)" in the Server Name.
 func parseServer(info []byte) (server, version string) {
 	var name, ver string
 	for _, line := range strings.Split(string(info), "\n") {
@@ -214,9 +184,7 @@ func parseServer(info []byte) (server, version string) {
 	return ServerPulseAudio, ver
 }
 
-// parseClients finds the session manager among the server's clients. ok is
-// false when the output is not JSON, which is how an old pactl that ignores
-// --format shows itself.
+// ok is false when an old pactl ignores --format and prints text.
 func parseClients(out []byte) (manager, version string, ok bool) {
 	var clients []struct {
 		Properties map[string]string `json:"properties"`
@@ -237,12 +205,9 @@ func parseClients(out []byte) (manager, version string, ok bool) {
 	return "", "", true
 }
 
-// parseMetadata reads `pw-metadata -n NAME 0`, whose lines look like
+// parseMetadata reads `pw-metadata -n NAME 0` lines such as
 //
 //	update: id:0 key:'bluetooth.autoswitch-to-headset-profile' value:'true' type:'Spa:String:JSON'
-//
-// A metadata object that does not exist prints nothing at all, which comes
-// back as an empty map.
 func parseMetadata(out []byte) map[string]string {
 	values := map[string]string{}
 	sc := bufio.NewScanner(bytes.NewReader(out))

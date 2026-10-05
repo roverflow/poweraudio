@@ -3,12 +3,9 @@ package tui
 import tea "charm.land/bubbletea/v2"
 
 const (
-	// helpChrome is the title line and the help line the help screen spends
-	// on itself, which is what is left over for the key rows.
+	// helpChrome is the title line and the help line.
 	helpChrome = 2
 
-	// helpKeyW is the key column, wide enough that the longest combination
-	// still leaves a gap before its description.
 	helpKeyW = 11
 )
 
@@ -40,8 +37,6 @@ func (m helpModel) Update(msg tea.Msg) (helpModel, tea.Cmd) {
 	return m, nil
 }
 
-// scroll walks the reference, which no longer fits a twenty-four row terminal
-// now that it documents the mouse and the fine volume steps.
 func (m helpModel) scroll(delta int) (helpModel, tea.Cmd) {
 	m.offset = clampScroll(m.offset+delta, len(helpRows), m.rowCount())
 	return m, nil

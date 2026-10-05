@@ -7,10 +7,8 @@ import (
 )
 
 func TestParseReportTracksThePowerSwitch(t *testing.T) {
-	// Three pushes from the dongle on this machine. The first two are one
-	// sitting: off, then on. The third is an earlier power-on. Byte 13 is
-	// the only one that follows the switch. The bytes around it move on
-	// every push.
+	// Captured reports: off, then on, then an earlier on. Only byte 13
+	// follows the switch.
 	off := "020e504911d556dd16000400040000324901c0a43000000300118d1b32504901c0830c0000030011e91900000000000000000000000000000000000000000000"
 	on := "020e504911d7c10017000400040100324901c0a43000000300118d1b32504901c0830c0000030011e91900000000000000000000000000000000000000000000"
 	onEarlier := "020e504911d23e8014000400040100324901c0a43000000300118d1b32504901c0830c0000030011e91900000000000000000000000000000000000000000000"
@@ -107,4 +105,29 @@ func hexByte(t *testing.T, s string) byte {
 		}
 	}
 	return n
+}
+
+func TestStateRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "poweraudio-earcups")
+	if _, _, ok := LoadState(path); ok {
+		t.Error("a missing file read as a known state")
+	}
+	for _, want := range []bool{false, true} {
+		if err := SaveState(path, want); err != nil {
+			t.Fatal(err)
+		}
+		on, at, ok := LoadState(path)
+		if !ok || on != want {
+			t.Errorf("saved %v, loaded on=%v ok=%v", want, on, ok)
+		}
+		if at.IsZero() {
+			t.Error("no time for the saved state")
+		}
+	}
+	if err := os.WriteFile(path, []byte("maybe\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := LoadState(path); ok {
+		t.Error("a file with neither on nor off read as a known state")
+	}
 }

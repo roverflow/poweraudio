@@ -76,9 +76,6 @@ func (m configModel) Update(msg tea.Msg) (configModel, tea.Cmd) {
 	return m, nil
 }
 
-// setSnapshot takes the config and the device list from a pushed snapshot.
-// Unsaved edits win over the daemon's copy, so a snapshot arriving mid-edit
-// cannot throw away a reordering that has not been written yet.
 func (m *configModel) setSnapshot(devices []audio.Device, cfg config.Config) {
 	m.devices = devices
 	m.ready = true
@@ -137,8 +134,6 @@ func (m configModel) handlePriorityInput(msg tea.KeyPressMsg) (configModel, tea.
 	return m, nil
 }
 
-// activate is enter on either list: adding a device to the ranking from the
-// lower list, or playing through a ranked entry from the upper one.
 func (m configModel) activate() (configModel, tea.Cmd) {
 	if m.prioFocus == focusAvailableList {
 		available := m.availableDevices()
@@ -192,7 +187,6 @@ func (m configModel) handleSwitchingInput(msg tea.KeyPressMsg) (configModel, tea
 	return m, nil
 }
 
-// click moves the cursor onto the row under the pointer.
 func (m configModel) click(row int) (configModel, tea.Cmd) {
 	if m.section == sectionSwitching {
 		if idx := m.switchRowIndex(row); idx >= 0 {
@@ -216,8 +210,6 @@ func (m configModel) click(row int) (configModel, tea.Cmd) {
 	return m, nil
 }
 
-// scroll moves the cursor down the flat list the two sections share, so the
-// wheel walks the ranking and the available devices in one run.
 func (m configModel) scroll(delta int) (configModel, tea.Cmd) {
 	if m.section == sectionSwitching {
 		total := len(connectOptions) + len(disconnectOptions)
@@ -236,9 +228,7 @@ func (m configModel) scroll(delta int) (configModel, tea.Cmd) {
 	return m, nil
 }
 
-// stepSelection moves one row through the flat list the ranking and the
-// available devices form together, falling off the bottom of one list into the
-// top of the other.
+// stepSelection walks the ranking and the available list as one list.
 func (m configModel) stepSelection(dir int) configModel {
 	available := m.availableDevices()
 
@@ -310,9 +300,6 @@ func (m configModel) View() string {
 	return m.viewPriorities(w, h, bar)
 }
 
-// sectionBar draws the two section tabs, and keeps the hint that explains how
-// to swap them only while it fits. The bar overflowing wrapped the header and
-// pushed every row below it down by one.
 func (m configModel) sectionBar(w int) string {
 	const hint = "  tab to swap"
 
@@ -406,8 +393,7 @@ func (m configModel) priorityRow(i int, p config.PriorityEntry, width, nameW, ty
 func (m configModel) availableRow(i int, dev audio.Device, width, nameW, typeW int) string {
 	selected := m.prioFocus == focusAvailableList && i == m.availCursor
 
-	// Five blank columns where the ranked rows carry their marker and rank,
-	// so both lists line up in the same columns.
+	// Blank where ranked rows have their marker and rank, so columns line up.
 	pieces := []rowPiece{
 		piece("      ", styleNormal),
 		piece(fit(dev.Name, nameW), styleMuted),
@@ -418,9 +404,7 @@ func (m configModel) availableRow(i int, dev audio.Device, width, nameW, typeW i
 	return listRow(width, selected, pieces...)
 }
 
-// typeLabel renders a device type the same way on both lists. Config entries
-// store the lowercase form and DeviceType.String returns the title-case one,
-// which used to put "bluetooth" above "Bluetooth" on the same screen.
+// typeLabel title-cases lowercase config types to match DeviceType.String.
 func typeLabel(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -483,8 +467,7 @@ func (m configModel) viewSwitching(w, h int, bar string) string {
 		body = append(body, radio(i, m.switching.OnConnect == opt.value, opt.label))
 	}
 
-	// The daemon compares ranks, and two unranked devices tie, so priority
-	// mode with an empty ranking is a setting that switches nothing ever.
+	// Unranked devices tie, so priority mode with no ranking never switches.
 	if warning := priorityModeWarning(m.switching.OnConnect, len(m.priorities)); warning != "" {
 		body = append(body, "      "+styleWarn.Render(truncate(warning, w-8)))
 	}
@@ -514,7 +497,6 @@ func priorityModeWarning(onConnect string, entries int) string {
 	return ""
 }
 
-// switchRowIndex maps a row of the content area onto a switching option.
 func (m configModel) switchRowIndex(row int) int {
 	row -= switchHeaderRows + 3 // the title, the subtitle and a blank
 	if row < 0 {
@@ -523,8 +505,8 @@ func (m configModel) switchRowIndex(row int) int {
 	if row < len(connectOptions) {
 		return row
 	}
-	// The gap holds the optional warning, a blank, the heading, the subtitle
-	// and a blank, so only a full gap lands on the disconnect options.
+	// Between the two groups sit the optional warning, a blank, the heading,
+	// the subtitle and a blank.
 	gap := 4
 	if priorityModeWarning(m.switching.OnConnect, len(m.priorities)) != "" {
 		gap++
@@ -536,7 +518,6 @@ func (m configModel) switchRowIndex(row int) int {
 	return -1
 }
 
-// rowCount is the list space left after the header and the help line.
 func (m configModel) rowCount() int {
 	_, h := screenSize(m.width, m.height)
 	if n := h - configHeaderRows - 2; n > 0 {
@@ -545,8 +526,6 @@ func (m configModel) rowCount() int {
 	return 1
 }
 
-// configColumns splits the width between the name and the type column, which
-// is the first thing to go on a narrow terminal.
 func configColumns(width int) (nameW, typeW int) {
 	// The row spends six columns on the presence marker and the rank.
 	avail := width - 3 - 6
@@ -565,8 +544,7 @@ func configColumns(width int) (nameW, typeW int) {
 	return nameW, typeW
 }
 
-// bodyLen counts the rows viewPriorities builds, so scrolling and the position
-// hint agree with what is on screen.
+// bodyLen must match the rows viewPriorities builds.
 func (m configModel) bodyLen() int {
 	n := len(m.priorities)
 	if n == 0 {
@@ -579,8 +557,6 @@ func (m configModel) bodyLen() int {
 	return n + 2 + a
 }
 
-// selectedRow maps the two cursors onto the single flat list that bodyLen
-// counts.
 func (m configModel) selectedRow() int {
 	if m.prioFocus == focusPriorityList {
 		if len(m.priorities) == 0 {
@@ -603,10 +579,8 @@ func (m *configModel) syncScroll() {
 	m.offset = clampOffset(m.offset, m.selectedRow(), m.bodyLen(), m.rowCount())
 }
 
-// availableDevices is every device no entry ranks. It goes through the shared
-// matcher, because the UI comparing names exactly disagreed with the daemon's
-// substring match: a hand-written entry switched correctly while the device it
-// matched still sat here as if it were unranked.
+// availableDevices uses the daemon's matcher so the UI and the daemon agree
+// on which devices are ranked.
 func (m configModel) availableDevices() []audio.Device {
 	return priority.Unranked(m.devices, m.priorities)
 }

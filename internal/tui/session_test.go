@@ -7,8 +7,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-// Without a daemon the subscription cannot open, and the UI has to say so and
-// keep trying rather than sitting on an empty screen.
 func TestSubscriptionRetriesWhenTheDaemonIsAway(t *testing.T) {
 	m := NewModel(nil)
 
@@ -93,7 +91,6 @@ func TestVolumeKeyTravelsThroughTheDebounce(t *testing.T) {
 		t.Errorf("the request carries %d%%, want 60%%", req.percent)
 	}
 
-	// The request going out and coming back leaves nothing in flight.
 	next, _ = m.Update(volumeResultMsg{})
 	if m = next.(Model); m.devices.vol.inflight {
 		t.Error("a finished request is still counted as in flight")
@@ -195,8 +192,7 @@ func TestQuitAsksOnceAboutUnsavedEdits(t *testing.T) {
 		t.Fatal("reordering did not mark the config dirty")
 	}
 
-	// The first q warns and stays, so the command it returns is the notice
-	// timer rather than a quit.
+	// The first q warns, so it returns the notice timer, not a quit.
 	next, _ = m.Update(key("q"))
 	m = next.(Model)
 	if !strings.Contains(stripANSI(m.View().Content), "Unsaved config") {

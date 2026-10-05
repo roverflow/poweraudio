@@ -31,8 +31,6 @@ func TestMatchesPriority(t *testing.T) {
 		{"type spelled differently", config.PriorityEntry{Match: "JBL", Type: "BlueTooth"}, true},
 		{"wrong type", config.PriorityEntry{Match: "JBL", Type: "usb"}, false},
 		{"different device", config.PriorityEntry{Match: "HDMI"}, false},
-		// An empty match would substring-match everything and outrank the
-		// entries that were actually configured.
 		{"empty match", config.PriorityEntry{}, false},
 		{"blank match", config.PriorityEntry{Match: "   "}, false},
 		{"type only", config.PriorityEntry{Type: "bluetooth"}, false},
@@ -63,8 +61,6 @@ func TestBest(t *testing.T) {
 		t.Fatalf("picked %v, want the highest ranked device that is present", got)
 	}
 
-	// Nothing on the list is here, so anything beats leaving the output where
-	// the session happened to put it.
 	got = Best(devices, []config.PriorityEntry{{Match: "Nothing Like This"}})
 	if got == nil {
 		t.Fatal("no device picked when the ranking matched nothing")
@@ -109,14 +105,11 @@ func TestRank(t *testing.T) {
 	if got := Rank(sink("Razer Barracuda X", audio.DeviceTypeUSB), priorities); got != 1 {
 		t.Errorf("Razer rank = %d, want 1", got)
 	}
-	// Unlisted devices sort behind everything on the list.
 	if got := Rank(sink("HDMI", audio.DeviceTypeHDMI), priorities); got != len(priorities) {
 		t.Errorf("unlisted rank = %d, want %d", got, len(priorities))
 	}
 }
 
-// "Dummy Output" is what is left when every real sink has gone, as it is for a
-// moment on the way into suspend. Picking it failed with "Not supported".
 func TestBestNeverPicksThePlaceholder(t *testing.T) {
 	dummy := audio.Device{ID: audio.PlaceholderID, Name: "Dummy Output", Available: true, Virtual: true}
 

@@ -40,7 +40,6 @@ func startServer(t *testing.T, ctx context.Context, d *Daemon, socket string) {
 	t.Cleanup(srv.Close)
 }
 
-// One round trip has to carry everything a screen draws.
 func TestIPCRoundTrip(t *testing.T) {
 	d, backend, socket := newTestDaemon(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -82,7 +81,6 @@ func TestIPCRoundTrip(t *testing.T) {
 		t.Errorf("backend default = %q, want %q", current, "2")
 	}
 
-	// Saving has to land in the file this daemon was started with.
 	if err := client.UpdatePriorities([]config.PriorityEntry{{Match: "JBL"}}); err != nil {
 		t.Fatalf("UpdatePriorities: %v", err)
 	}
@@ -94,7 +92,6 @@ func TestIPCRoundTrip(t *testing.T) {
 		t.Errorf("saved priorities = %+v", saved.Priority)
 	}
 
-	// The next snapshot shows both changes.
 	snap, err = client.Snapshot()
 	if err != nil {
 		t.Fatalf("second Snapshot: %v", err)
@@ -110,8 +107,6 @@ func TestIPCRoundTrip(t *testing.T) {
 	}
 }
 
-// A subscriber gets the state now and then every change, so the UI does not
-// have to poll for one.
 func TestSubscribeStreamsChanges(t *testing.T) {
 	d, _, socket := newTestDaemon(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -155,8 +150,6 @@ func TestSubscribeStreamsChanges(t *testing.T) {
 	}
 }
 
-// Unlinking the socket unconditionally let a second daemon take over from a
-// live one, after which both fought over the default sink.
 func TestSecondDaemonIsRefused(t *testing.T) {
 	d, _, socket := newTestDaemon(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -170,8 +163,7 @@ func TestSecondDaemonIsRefused(t *testing.T) {
 		second.Close()
 		t.Fatal("a second daemon was allowed to take the socket")
 	}
-	// main.go exits zero on this one, so it has to be recognisable rather than
-	// only readable.
+	// main.go matches this error with errors.Is.
 	if !errors.Is(err, ErrAlreadyRunning) {
 		t.Errorf("error = %v, want ErrAlreadyRunning", err)
 	}
@@ -179,7 +171,6 @@ func TestSecondDaemonIsRefused(t *testing.T) {
 		t.Errorf("error = %v, want it to name the socket", err)
 	}
 
-	// The first one has to still be there afterwards.
 	conn, dialErr := net.Dial("unix", socket)
 	if dialErr != nil {
 		t.Fatalf("the original daemon lost its socket: %v", dialErr)
@@ -187,8 +178,6 @@ func TestSecondDaemonIsRefused(t *testing.T) {
 	conn.Close()
 }
 
-// A socket file left behind by a crash has nothing behind it, so starting over
-// it is fine.
 func TestStaleSocketIsReplaced(t *testing.T) {
 	d, _, socket := newTestDaemon(t)
 	ctx, cancel := context.WithCancel(context.Background())

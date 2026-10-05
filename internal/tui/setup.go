@@ -58,10 +58,8 @@ func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if key == "ctrl+c" {
 			return m, tea.Quit
 		}
-		// While a daemon is coming up, swallow everything. This guard used
-		// to sit behind a flag that was set on a discarded copy of the
-		// model, so a second Enter would launch a second daemon that then
-		// stole the first one's socket.
+		// Swallow keys while a daemon starts, or a second Enter launches a
+		// second daemon that steals the socket.
 		if m.starting {
 			return m, nil
 		}
@@ -95,8 +93,6 @@ func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.WindowSizeMsg:
-		// The screen used to be drawn at a fixed eighty columns, which wrapped
-		// every line of it on a narrower terminal.
 		m.width = msg.Width
 		return m, nil
 
@@ -183,9 +179,7 @@ func setupView(s string) tea.View {
 
 func (m SetupModel) startProcess() tea.Cmd {
 	return func() tea.Msg {
-		// A daemon started from here has no journal behind it, and its output
-		// used to go nowhere at all, so a session daemon that failed to switch
-		// left no trace to read afterwards.
+		// A daemon started here has no journal, so its output goes to a file.
 		logPath := daemonLogPath()
 		log, err := openDaemonLog(logPath)
 		if err != nil {
@@ -216,8 +210,6 @@ func (m SetupModel) startProcess() tea.Cmd {
 	}
 }
 
-// openDaemonLog appends to the log so restarts across a session pile up in one
-// file rather than each one wiping the last.
 func openDaemonLog(path string) (*os.File, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("creating log dir: %w", err)
@@ -308,10 +300,8 @@ WantedBy=default.target
 `, binaryPath)
 }
 
-// resolvedExecutable is the path to this binary with symlinks followed.
-// filepath.EvalSymlinks returns an empty string on failure, and the previous
-// `bin, _ = EvalSymlinks(bin)` turned that into an exec of "" or a unit file
-// with nothing after ExecStart=. Fall back to the unresolved path instead.
+// resolvedExecutable falls back to the unresolved path because
+// EvalSymlinks returns "" on failure.
 func resolvedExecutable() (string, error) {
 	bin, err := os.Executable()
 	if err != nil {

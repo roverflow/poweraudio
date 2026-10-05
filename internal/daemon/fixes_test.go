@@ -31,7 +31,6 @@ func placeholder() audio.Device {
 	return audio.Device{ID: audio.PlaceholderID, Name: "Dummy Output", Available: true, Virtual: true}
 }
 
-// recorder stands in for the desktop notifier.
 type recorder struct {
 	mu      sync.Mutex
 	notices []notify.Notice
@@ -82,9 +81,8 @@ func hasLevel(d *Daemon, level ipc.Level) []string {
 	return out
 }
 
-// WirePlumber remembers the headset and makes it the default before the
-// daemon looks. "previous" then recorded the headset as where to go back to,
-// so disconnecting it fell through to the ranking.
+// WirePlumber makes the headset default before the daemon looks. "previous"
+// must still remember the output from before the headset.
 func TestPreviousSurvivesTheSessionManagerSwitchingFirst(t *testing.T) {
 	backend := &stubBackend{current: "hdmi", devices: []audio.Device{
 		{ID: "ryzen", Name: "Ryzen", Available: true},
@@ -101,7 +99,7 @@ func TestPreviousSurvivesTheSessionManagerSwitchingFirst(t *testing.T) {
 	connect(ctx, d, jblMAC, "JBL Tune 520BT")
 
 	backend.remove(jblID)
-	backend.setCurrent("ryzen") // and picks from its own history on the way out
+	backend.setCurrent("ryzen") // then picks from its history on the way out
 	disconnect(ctx, d, jblMAC, "JBL Tune 520BT")
 
 	if got := backend.defaultID(); got != "hdmi" {
@@ -129,15 +127,12 @@ func TestAlreadyDefaultIsNotSkippedAsLowerRanked(t *testing.T) {
 	if sets := backend.switches(); len(sets) != 0 {
 		t.Errorf("switched %v onto a device that was already the default", sets)
 	}
-	// The session manager's switch is still announced, as the connect it was.
 	notices := rec.got()
 	if len(notices) != 1 || notices[0].Body != reasonConnect.body() {
 		t.Errorf("notices = %+v, want one announcing the connect", notices)
 	}
 }
 
-// A Bluetooth mouse waking from idle while the headset waited for its sink
-// took the headset's place, and the headset never got the output.
 func TestMouseDoesNotCancelAHeadsetSwitch(t *testing.T) {
 	backend := &stubBackend{current: "ryzen", devices: []audio.Device{{ID: "ryzen", Name: "Ryzen", Available: true}}}
 	d, _ := testDaemon(t, backend, nil)
@@ -161,8 +156,7 @@ func TestMouseDoesNotCancelAHeadsetSwitch(t *testing.T) {
 	}
 }
 
-// On the way into suspend every real sink goes and only the placeholder is
-// left. The daemon picked it, and PipeWire answered "Not supported".
+// PipeWire answers "Not supported" to a switch onto the placeholder.
 func TestPlaceholderIsNeverPicked(t *testing.T) {
 	backend := &stubBackend{current: "ryzen", devices: []audio.Device{{ID: "ryzen", Name: "Ryzen", Available: true}}}
 	backend.refuse = map[string]bool{audio.PlaceholderID: true}
@@ -184,7 +178,6 @@ func TestPlaceholderIsNeverPicked(t *testing.T) {
 		t.Errorf("announced %+v for the placeholder", n)
 	}
 
-	// A real sink coming back is where the output goes.
 	backend.add(audio.Device{ID: "ryzen", Name: "Ryzen", Available: true})
 	d.handleAudioEvent(ctx, audio.Event{Type: audio.EventSinkAdded})
 	if got := backend.defaultID(); got != "ryzen" {
@@ -192,8 +185,7 @@ func TestPlaceholderIsNeverPicked(t *testing.T) {
 	}
 }
 
-// After a resume WirePlumber restored the Barracuda from its history while
-// the earcups were off. The daemon took that as someone's choice and left it.
+// WirePlumber can restore the Barracuda after a resume with its earcups off.
 func TestExternalSwitchOntoAHeadsetThatIsOffFallsBack(t *testing.T) {
 	backend := barracudaSinks(t, "ryzen")
 	d, _ := testDaemon(t, backend, nil)
@@ -208,8 +200,6 @@ func TestExternalSwitchOntoAHeadsetThatIsOffFallsBack(t *testing.T) {
 	}
 }
 
-// At boot the cards arrive one at a time. Falling back in the middle picked
-// the HDMI output, which was the only real sink a second in, every boot.
 func TestStartupHoldLeavesTheSessionManagersPick(t *testing.T) {
 	backend := &stubBackend{current: audio.PlaceholderID, devices: []audio.Device{placeholder()}}
 	d, rec := testDaemon(t, backend, func(c *config.Config) {
@@ -302,8 +292,7 @@ func TestNotificationsByReason(t *testing.T) {
 		}
 	})
 
-	// WirePlumber moves the output off a headset within a second of it
-	// disconnecting, before the daemon's own fallback runs.
+	// WirePlumber moves off a headset before the daemon's own fallback runs.
 	t.Run("session manager falls back after a disconnect", func(t *testing.T) {
 		backend := &stubBackend{current: jblID, devices: []audio.Device{
 			{ID: "ryzen", Name: "Ryzen", Available: true},
@@ -323,8 +312,7 @@ func TestNotificationsByReason(t *testing.T) {
 		}
 	})
 
-	// The default can move while the headset's sink is still listed for a
-	// moment after the link dropped.
+	// The headset's sink can stay listed for a moment after the link drops.
 	t.Run("session manager falls back before the sink goes", func(t *testing.T) {
 		backend := &stubBackend{current: jblID, devices: []audio.Device{
 			{ID: "ryzen", Name: "Ryzen", Available: true},
@@ -340,8 +328,6 @@ func TestNotificationsByReason(t *testing.T) {
 		}
 	})
 
-	// A headset that was not playing says nothing about a change made just
-	// after it left.
 	t.Run("external after an idle headset leaves", func(t *testing.T) {
 		backend := &stubBackend{current: "ryzen", devices: []audio.Device{
 			{ID: "ryzen", Name: "Ryzen", Available: true},
@@ -383,8 +369,6 @@ func TestNotificationsByReason(t *testing.T) {
 	})
 }
 
-// A default change only needs the default's name, which is one call. Listing
-// every sink for it was two.
 func TestDefaultChangeReadsOnlyTheDefault(t *testing.T) {
 	backend := rankedSinks(t, "barracuda")
 	d, _ := testDaemon(t, backend, nil)
@@ -401,8 +385,6 @@ func TestDefaultChangeReadsOnlyTheDefault(t *testing.T) {
 	}
 }
 
-// pactl reports changes that alter nothing a UI draws, and each one used to
-// build and send a snapshot to every subscriber.
 func TestUnchangedSinkListDoesNotWakeSubscribers(t *testing.T) {
 	backend := rankedSinks(t, "barracuda")
 	d, _ := testDaemon(t, backend, nil)
@@ -449,8 +431,7 @@ type permissionError struct{}
 
 func (*permissionError) Error() string { return "open /dev/hidraw4: permission denied" }
 
-// flakyBackend's event stream ends on the first subscription, the way pactl
-// subscribe exits when the sound server restarts, and stays up after that.
+// flakyBackend's first stream closes at once, like pactl subscribe on restart.
 type flakyBackend struct {
 	*stubBackend
 	mu    sync.Mutex
@@ -501,8 +482,6 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
-// A daemon whose pactl subscribe had exited still answered the UI but no
-// longer noticed an unplug.
 func TestAudioEventStreamIsFollowedAgain(t *testing.T) {
 	shortTimers(t)
 	backend := &flakyBackend{stubBackend: rankedSinks(t, "barracuda"), live: make(chan audio.Event, 4)}
@@ -514,7 +493,6 @@ func TestAudioEventStreamIsFollowedAgain(t *testing.T) {
 
 	waitFor(t, "a second subscription", func() bool { return backend.subscriptions() >= 2 })
 
-	// The new stream works: removing the default moves the output.
 	waitFor(t, "the startup hold to end", func() bool { return !d.isHolding() })
 	backend.remove("barracuda")
 	backend.live <- audio.Event{Type: audio.EventSinkRemoved}
@@ -529,8 +507,6 @@ func TestAudioEventStreamIsFollowedAgain(t *testing.T) {
 	}
 }
 
-// Suspend takes the sinks away. The daemon used to fall back on the way down,
-// to the placeholder, and announce a run of switches on the way back up.
 func TestSleepHoldsSwitchesUntilResumeSettles(t *testing.T) {
 	shortTimers(t)
 	backend := &stubBackend{current: jblID, devices: []audio.Device{
@@ -564,7 +540,7 @@ func TestSleepHoldsSwitchesUntilResumeSettles(t *testing.T) {
 		t.Fatalf("switched %v while the machine was going to sleep", sets)
 	}
 
-	// Back up: the speakers return, the headset does not.
+	// On resume the speakers return and the headset does not.
 	backend.remove(audio.PlaceholderID)
 	backend.add(audio.Device{ID: "ryzen", Name: "Ryzen", Available: true})
 	states <- power.Awake
@@ -584,9 +560,7 @@ func TestSleepHoldsSwitchesUntilResumeSettles(t *testing.T) {
 	}
 }
 
-// At reboot the login session closes first, which revokes its access to the
-// sound cards, and every sink vanishes about a second before systemd stops the
-// daemon. Each departure used to run a fallback that found nothing.
+// At reboot every sink vanishes a second before systemd stops the daemon.
 func TestShutdownHoldsSwitches(t *testing.T) {
 	shortTimers(t)
 	backend := &stubBackend{current: "ryzen", devices: []audio.Device{
@@ -633,7 +607,6 @@ func TestShutdownHoldsSwitches(t *testing.T) {
 	}
 }
 
-// A cancelled shutdown hands switching back once the sinks settle.
 func TestCancelledShutdownResumesSwitching(t *testing.T) {
 	shortTimers(t)
 	backend := rankedSinks(t, "barracuda")
@@ -657,8 +630,7 @@ func TestCancelledShutdownResumesSwitching(t *testing.T) {
 	waitFor(t, "the fallback", func() bool { return backend.defaultID() != "barracuda" })
 }
 
-// Logging out revokes the session's access to every card while the daemon
-// still runs, with no shutdown announced. That is one outage, and one line.
+// Logging out removes every sink with no shutdown announced.
 func TestNoOutputLeftIsSaidOncePerOutage(t *testing.T) {
 	backend := &stubBackend{current: "ryzen", devices: []audio.Device{
 		{ID: "ryzen", Name: "Ryzen", Available: true},
@@ -692,7 +664,7 @@ func TestNoOutputLeftIsSaidOncePerOutage(t *testing.T) {
 		t.Fatalf("said there was no output %d times in one outage, want once", got)
 	}
 
-	// An output comes back, and then goes again: a second outage.
+	// An output comes back and then goes again, which is a second outage.
 	backend.add(audio.Device{ID: "ryzen", Name: "Ryzen", Available: true})
 	d.handleAudioEvent(ctx, audio.Event{Type: audio.EventSinkAdded})
 	if got := backend.defaultID(); got != "ryzen" {

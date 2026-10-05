@@ -9,8 +9,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-// A daemon started from the setup screen has no journal behind it, so its
-// output has to land in a file someone can read afterwards.
 func TestDaemonLogPathFollowsXDGState(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", "/tmp/state")
 	if got, want := daemonLogPath(), "/tmp/state/poweraudio/daemon.log"; got != want {
@@ -50,8 +48,6 @@ func TestOpenDaemonLogAppends(t *testing.T) {
 	}
 }
 
-// The setup screen was drawn at a fixed eighty columns, which wrapped every
-// line of it on a narrower terminal.
 func TestSetupScreenFollowsTheTerminalWidth(t *testing.T) {
 	var m tea.Model = NewSetupModel(nil)
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 44, Height: 12})

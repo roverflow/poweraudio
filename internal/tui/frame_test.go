@@ -22,8 +22,7 @@ func key(s string) tea.KeyPressMsg {
 	return tea.KeyPressMsg{Text: s, Code: []rune(s)[0]}
 }
 
-// testSnapshot is a daemon at rest: a handful of sinks, a ranking that covers
-// some of them, and a log long enough to scroll.
+// testSnapshot has a partial ranking and a log long enough to scroll.
 func testSnapshot() ipc.Snapshot {
 	start := time.Date(2026, 3, 4, 9, 15, 0, 0, time.UTC)
 
@@ -74,7 +73,6 @@ func testSnapshot() ipc.Snapshot {
 	}
 }
 
-// modelAt is a model that has been sized, fed one snapshot and put on a screen.
 func modelAt(t *testing.T, width, height int, screenKey string) Model {
 	t.Helper()
 
@@ -179,8 +177,6 @@ func TestStatusBarShowsTheDaemonState(t *testing.T) {
 	}
 }
 
-// A retry timer from a generation a manual reconnect has overtaken must not
-// open a second subscription.
 func TestStaleSubscriptionMessagesAreDropped(t *testing.T) {
 	m := modelAt(t, 90, 24, "")
 	gen := m.gen

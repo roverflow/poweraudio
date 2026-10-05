@@ -1,16 +1,5 @@
-// Package audio lists the machine's audio outputs and moves the default one.
-//
-// There is a single backend and it drives pactl. PipeWire and PulseAudio look
-// like two servers from the outside but like one from here, because the
-// PipeWire install people actually run ships pipewire-pulse, which answers
-// pactl, and because the sink list pactl returns carries the PipeWire node
-// properties the old pw-dump backend went looking for, among them device.api,
-// device.bus, device.form.factor and api.bluez5.address. Reading them through
-// pactl costs one small JSON document per refresh instead of the entire
-// PipeWire object graph, which was 486 KB and 129 objects to find four sinks.
-// A machine running PulseAudio proper answers the same commands with fewer
-// properties set, which the classification falls back on names to cover, so
-// the only thing the server behind pactl still decides is what Name reports.
+// Package audio lists the machine's audio outputs and moves the default one
+// through pactl, which PulseAudio and PipeWire's pipewire-pulse both answer.
 package audio
 
 import (
@@ -24,10 +13,8 @@ import (
 	"strings"
 )
 
-// Detect returns the backend for a config file's backend setting. All three
-// server names stay accepted because existing configs name them, but they
-// produce the same pactl backend now, and the setting only survives so that
-// upgrading does not fail on a file someone already has.
+// Detect returns the pactl backend. It still accepts every old backend
+// setting so existing configs load.
 func Detect(preference string) (Backend, error) {
 	switch preference {
 	case "", "auto", "pipewire", "pulseaudio":
@@ -44,8 +31,6 @@ func Detect(preference string) (Backend, error) {
 		return nil, fmt.Errorf("pactl info failed, so no sound server is answering: start PipeWire with pipewire-pulse, or PulseAudio: %w", err)
 	}
 
-	// The server cannot change under a running daemon, and asking costs a
-	// subprocess, so the name is read here rather than on every Name call.
 	return &pactlBackend{name: serverName(string(out))}, nil
 }
 
@@ -68,8 +53,7 @@ func (b *pactlBackend) ListSinks(ctx context.Context) ([]Device, error) {
 		return nil, err
 	}
 
-	// Losing this only costs the default marker, which is worth less than the
-	// sink list itself, so the error goes no further.
+	// A failed lookup only loses the default marker, not the sink list.
 	defaultName, _ := b.defaultSinkName(ctx)
 	return devicesFrom(sinks, defaultName), nil
 }
@@ -111,10 +95,6 @@ func (b *pactlBackend) defaultSinkName(ctx context.Context) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// pactlSink is the part of a `pactl -f json list sinks` entry this package
-// reads. Everything about a device that is not volume, mute or identity lives
-// in properties, which is where both servers put what they know about the
-// hardware behind the sink.
 type pactlSink struct {
 	Name        string                     `json:"name"`
 	Description string                     `json:"description"`
@@ -122,9 +102,7 @@ type pactlSink struct {
 	Mute        bool                       `json:"mute"`
 	Volume      map[string]pactlSinkVolume `json:"volume"`
 	Properties  map[string]string          `json:"properties"`
-	// ActivePort is the port sound is routed to. Ports carries whether each
-	// one has something on the other end. Both are empty when the server
-	// omits them.
+	// Both are empty when the server omits them.
 	ActivePort string      `json:"active_port"`
 	Ports      []pactlPort `json:"ports"`
 }
@@ -136,8 +114,7 @@ type pactlPort struct {
 
 type pactlSinkVolume struct {
 	Value int `json:"value"`
-	// pactl renders this as "40%", not as a number. Decoding it into an int
-	// fails the whole document, which took the entire backend down with it.
+	// pactl prints this as "40%", not a number.
 	ValuePercent string `json:"value_percent"`
 	DB           string `json:"db"`
 }
@@ -150,9 +127,6 @@ func decodeSinks(out []byte) ([]pactlSink, error) {
 	return sinks, nil
 }
 
-// devicesFrom and deviceFrom are the whole translation from what pactl says to
-// what the rest of the program uses, kept apart from the subprocess so a
-// captured sample can drive them in a test.
 func devicesFrom(sinks []pactlSink, defaultName string) []Device {
 	var devices []Device
 	for _, s := range sinks {
@@ -163,10 +137,7 @@ func devicesFrom(sinks []pactlSink, defaultName string) []Device {
 
 func deviceFrom(s pactlSink, defaultName string) Device {
 	dev := Device{
-		// The sink name survives a reconnect, where the PipeWire node id the
-		// old backend used was handed out fresh every time, so a priority
-		// entry or a pending switch aimed at an id went stale the moment the
-		// device came back.
+		// Sink names survive a reconnect. PipeWire node ids do not.
 		ID:          s.Name,
 		Name:        displayName(s),
 		Description: s.Name,
@@ -185,10 +156,8 @@ func deviceFrom(s pactlSink, defaultName string) Device {
 	return dev
 }
 
-// displayName is the description a person reads. pactl prints "(null)" when
-// a sink has none, which is what PipeWire's AirPlay discovery creates for a
-// speaker that announces no name, and the list showed a device called
-// "(null)". The sink name still says what it is.
+// pactl prints "(null)" for a sink with no description, such as an AirPlay
+// speaker that announces no name.
 func displayName(s pactlSink) string {
 	desc := strings.TrimSpace(s.Description)
 	if desc == "" || desc == "(null)" {
@@ -197,22 +166,11 @@ func displayName(s pactlSink) string {
 	return desc
 }
 
-// networkSinkPrefixes are the names the network modules give their sinks when
-// the server publishes none of the properties isVirtual checks. PipeWire's
-// AirPlay discovery uses raop_sink, and PulseAudio uses raop_output for
-// AirPlay and tunnel for a sink on another machine.
+// Name prefixes of network sinks, for servers that do not set node.network.
 var networkSinkPrefixes = []string{"raop_sink.", "raop_output.", "tunnel.", "tunnel-sink."}
 
-// isVirtual reports a sink with no local hardware behind it. PipeWire marks
-// null sinks with the null-audio-sink factory or node.virtual, and sinks that
-// send audio over the network (AirPlay, RTP, VBAN, a PulseAudio tunnel) with
-// node.network. Filters carry a device.class of filter, and plain PulseAudio
-// calls its null sink abstract. A sink that publishes none of these is treated
-// as hardware, which is what every sink was before this check existed.
-//
-// A network sink counts because the fallback must not pick it on its own. An
-// AirPlay speaker discovered on the LAN appears for a few seconds at a time,
-// and audio sent there plays in whatever room that speaker is in.
+// isVirtual reports a sink with no local hardware behind it. Network sinks
+// count, so the fallback never sends audio to a speaker in another room.
 func isVirtual(s pactlSink) bool {
 	if s.Name == PlaceholderID {
 		return true
@@ -235,8 +193,6 @@ func isVirtual(s pactlSink) bool {
 	return false
 }
 
-// parseHexID reads pactl's "0x1532". An empty or unreadable value is zero,
-// which means the server did not publish a USB id.
 func parseHexID(s string) uint16 {
 	s = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(s, "0x"), "0X"))
 	if s == "" {
@@ -249,15 +205,9 @@ func parseHexID(s string) uint16 {
 	return uint16(n)
 }
 
-// sinkAvailable reports whether audio can come out of this sink.
-//
-// pactl keeps a sink for as long as the card is present. SUSPENDED only means
-// nothing is playing, so an idle sink stays available. The port list is what
-// says the far end is gone. The active port is where sound is routed, and
-// "not available" means that port is empty. PipeWire writes that phrase.
-// PulseAudio writes "no". "availability unknown" stays available: a dongle
-// with no jack sense reports unknown the whole time it is plugged in, and
-// treating that as gone would hide the headset while it is on.
+// sinkAvailable reports whether audio can come out of this sink. Unknown
+// counts as available because the Barracuda dongle has no jack sense and
+// reports "availability unknown" the whole time it is plugged in.
 func sinkAvailable(s pactlSink) bool {
 	if s.ActivePort != "" {
 		for _, p := range s.Ports {
@@ -286,9 +236,7 @@ func portAvailable(availability string) bool {
 	}
 }
 
-// classify decides what kind of output a sink is. The PipeWire properties come
-// first because they say so exactly, and the name matching below them is what
-// is left when a plain PulseAudio server publishes none of them.
+// PipeWire properties come first. Name matching covers plain PulseAudio.
 func classify(s pactlSink) DeviceType {
 	if isBluetooth(s) {
 		return DeviceTypeBluetooth
@@ -318,10 +266,7 @@ func classify(s pactlSink) DeviceType {
 	return DeviceTypeSpeaker
 }
 
-// isBluetooth asks every way a sink can say it came from BlueZ, because which
-// one is set depends on the server and on how old the module is. node.name and
-// the sink name agree on pipewire-pulse and differ on a plain server, so both
-// get the prefix check.
+// node.name and the sink name differ on plain PulseAudio, so check both.
 func isBluetooth(s pactlSink) bool {
 	if s.Properties["device.api"] == "bluez5" {
 		return true
@@ -333,9 +278,6 @@ func isBluetooth(s pactlSink) bool {
 		strings.HasPrefix(s.Name, "bluez_")
 }
 
-// macAddress finds the address the daemon matches a BlueZ device against. The
-// properties are asked first and the name is parsed last, since the name only
-// carries an address at all on the PipeWire side.
 func macAddress(s pactlSink) string {
 	if mac := s.Properties["api.bluez5.address"]; mac != "" {
 		return mac
@@ -350,9 +292,7 @@ func macAddress(s pactlSink) string {
 }
 
 // macFromNodeName turns "bluez_output.3C_B0_ED_3A_2C_42.1" into
-// "3C:B0:ED:3A:2C:42". The length check is what keeps an ordinary sink name
-// such as "alsa_output.pci-0000_0e_00.6.analog-stereo" from producing
-// nonsense, since its second segment is not an address.
+// "3C:B0:ED:3A:2C:42".
 func macFromNodeName(nodeName string) string {
 	parts := strings.SplitN(nodeName, ".", 3)
 	if len(parts) < 2 {
@@ -365,10 +305,7 @@ func macFromNodeName(nodeName string) string {
 	return strings.ReplaceAll(mac, "_", ":")
 }
 
-// channelVolume reports one level for a sink, because the channels of a sink
-// move together here and the UI draws a single bar. The channel it reads has
-// to be the same one every refresh or the bar flickers between near-equal
-// values, and Go randomises map iteration, so the names are sorted first.
+// Map order is random, so sort the channel names or the volume bar flickers.
 func channelVolume(vol map[string]pactlSinkVolume) float64 {
 	names := make([]string, 0, len(vol))
 	for name := range vol {
@@ -381,9 +318,7 @@ func channelVolume(vol map[string]pactlSinkVolume) float64 {
 	return parsePercent(vol[names[0]].ValuePercent)
 }
 
-// parsePercent turns pactl's "40%" into 0.40. An unreadable value reports full
-// volume, which is wrong in a way you can see rather than a zero bar that
-// looks deliberate.
+// An unreadable value reads as full volume, not a deliberate-looking zero.
 func parsePercent(s string) float64 {
 	n, err := strconv.Atoi(strings.TrimSuffix(strings.TrimSpace(s), "%"))
 	if err != nil {
@@ -392,10 +327,7 @@ func parsePercent(s string) float64 {
 	return float64(n) / 100.0
 }
 
-// serverName reads the Server Name line of `pactl info`. pipewire-pulse
-// answers "PulseAudio (on PipeWire 1.6.8)", which names both servers, so
-// PipeWire wins wherever it appears. Nothing here branches on the answer, it
-// is only what the status screen tells the user it is talking to.
+// pipewire-pulse answers "PulseAudio (on PipeWire 1.6.8)", so PipeWire wins.
 func serverName(info string) string {
 	for _, line := range strings.Split(info, "\n") {
 		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "Server Name:")

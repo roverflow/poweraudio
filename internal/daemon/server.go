@@ -15,23 +15,17 @@ import (
 )
 
 const (
-	// requestTimeout bounds a single client exchange. A client that connects
-	// and then says nothing used to hold a goroutine for the life of the
-	// daemon. A subscription is exempt: it is idle by design.
+	// requestTimeout stops a silent client holding a goroutine forever. A
+	// subscription is exempt.
 	requestTimeout = 10 * time.Second
 
-	// maxRequest matches the client's read limit. A priority list long enough
-	// to exceed the default scanner buffer used to look like a client that
-	// sent nothing at all.
+	// maxRequest matches the client's read limit, for long priority lists.
 	maxRequest = 1 << 20
 )
 
-// ErrAlreadyRunning means a live daemon answered on the socket, so this one
-// has nothing to do. main.go logs it and exits zero on purpose: the unit is
-// Restart=on-failure with RestartSec=5, so a non-zero exit here had systemd
-// restarting the service every five seconds for as long as a session daemon
-// held the socket, and at that spacing the start limit of five failures in ten
-// seconds never trips to stop it.
+// ErrAlreadyRunning means a live daemon answered on the socket. main.go exits
+// zero on it, since a non-zero exit makes systemd's Restart=on-failure restart
+// the unit every five seconds.
 var ErrAlreadyRunning = errors.New("another poweraudio daemon is already listening")
 
 type Server struct {
@@ -48,10 +42,9 @@ func NewServer(socketPath string, d *Daemon) *Server {
 }
 
 func (s *Server) Start(ctx context.Context) error {
-	// Unlinking the socket unconditionally let a second daemon take the first
-	// one's place, after which both fought over the default sink. Ask first:
-	// anything that answers is a live daemon, anything that does not is a
-	// leftover file from a crash.
+	// Removing the socket blindly would let two daemons fight over the
+	// default sink. A dial that connects means a live daemon. Otherwise the
+	// file is stale.
 	if conn, err := net.DialTimeout("unix", s.socketPath, time.Second); err == nil {
 		conn.Close()
 		return fmt.Errorf("%w on %s", ErrAlreadyRunning, s.socketPath)
@@ -115,19 +108,15 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	writeResponse(conn, s.daemon.Handle(ctx, req))
 }
 
-// stream keeps the connection open and writes a snapshot per change until the
-// client hangs up or the daemon stops.
 func (s *Server) stream(ctx context.Context, conn net.Conn) {
-	// No request deadline: a subscription spends most of its life waiting for
-	// something to happen.
+	// A subscription waits indefinitely, so it has no request deadline.
 	_ = conn.SetDeadline(time.Time{})
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// The client has nothing more to say, so reading is only how the server
-	// learns it went away. Without this a closed UI left a subscription
-	// running until the next snapshot failed to write.
+	// Reading is how the server notices the client went away. Without it, a
+	// closed UI keeps its subscription until the next write fails.
 	go func() {
 		defer cancel()
 		buf := make([]byte, 256)

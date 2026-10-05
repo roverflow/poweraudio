@@ -9,8 +9,7 @@ import (
 	"testing"
 )
 
-// fakeRunner answers each command from a captured file. A command with no
-// entry fails, the way a missing binary does.
+// fakeRunner serves testdata files. An unlisted command fails.
 func fakeRunner(t *testing.T, files map[string]string) Runner {
 	t.Helper()
 	return func(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -73,8 +72,7 @@ func TestWirePlumber05(t *testing.T) {
 }
 
 func TestWirePlumber04HasNoSettings(t *testing.T) {
-	// 0.4 has no sm-settings metadata, and pw-metadata prints nothing for a
-	// name that does not exist.
+	// pw-metadata prints nothing for metadata that does not exist.
 	r := Run(context.Background(), fakeRunner(t, map[string]string{
 		cmdInfo:     "info-pipewire.txt",
 		cmdClients:  "clients-wireplumber-0.4.json",
@@ -141,7 +139,6 @@ func TestNoServer(t *testing.T) {
 	}
 }
 
-// An old pactl ignores --format and prints text, which the backend cannot read.
 func TestOldPactlWithoutJSON(t *testing.T) {
 	r := Run(context.Background(), fakeRunner(t, map[string]string{
 		cmdInfo:    "info-pulseaudio.txt",

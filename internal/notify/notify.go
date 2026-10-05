@@ -1,11 +1,5 @@
-// Package notify shows desktop notifications over the session bus.
-//
-// It talks to org.freedesktop.Notifications directly instead of starting
-// notify-send for every message. That keeps the id of the last notification,
-// so a new one replaces it on screen instead of stacking, and it lets a quick
-// burst of changes collapse into the one that matters: a fallback, the session
-// manager's own correction a moment later, and a second fallback show up as a
-// single notification naming where the output ended up.
+// Package notify shows desktop notifications over D-Bus. Each one replaces
+// the last, and a quick burst of changes collapses into a single notice.
 package notify
 
 import (
@@ -24,18 +18,15 @@ type Notice struct {
 
 const (
 	// settleDelay is how long a notice waits for a newer one to replace it.
-	// The switches it collapses arrive within a few tens of milliseconds.
 	settleDelay = 300 * time.Millisecond
 
-	// expireMs is how long the notification stays up, in milliseconds.
 	expireMs = 4000
 
 	busName = "org.freedesktop.Notifications"
 	path    = "/org/freedesktop/Notifications"
 )
 
-// Notifier delivers notices. Show never blocks, so it is safe to call from the
-// daemon's event loop.
+// Notifier delivers notices. Show never blocks.
 type Notifier struct {
 	delay   time.Duration
 	deliver func(Notice)
@@ -47,8 +38,6 @@ type Notifier struct {
 }
 
 // New returns a Notifier that sends to the desktop's notification server.
-// logf receives a line when a notice could not be shown, which is normal while
-// the desktop is still starting.
 func New(logf func(format string, args ...any)) *Notifier {
 	b := &bus{logf: logf}
 	return newNotifier(settleDelay, b.send)
@@ -58,8 +47,7 @@ func newNotifier(delay time.Duration, deliver func(Notice)) *Notifier {
 	return &Notifier{delay: delay, deliver: deliver}
 }
 
-// Show queues a notice. A newer notice arriving within the settle delay takes
-// its place.
+// Show queues a notice. A newer one within the settle delay replaces it.
 func (n *Notifier) Show(notice Notice) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -95,9 +83,7 @@ func (n *Notifier) Close() {
 	}
 }
 
-// bus holds the session bus connection and the id of the notification on
-// screen. Calls come from one timer at a time, but the lock keeps that true
-// even if two flushes overlap.
+// bus.mu serializes sends, since two timer flushes can overlap.
 type bus struct {
 	logf func(format string, args ...any)
 
@@ -119,9 +105,8 @@ func (b *bus) send(notice Notice) {
 		b.conn = conn
 	}
 
-	// Calling Notify on a name nobody owns asks the bus to start a server
-	// for it. At login that can launch a stray notification daemon before
-	// the desktop's own is up, so nobody home means the notice is dropped.
+	// Notify on an unowned name makes the bus start a server, which at login
+	// can be a stray one.
 	var owned bool
 	if err := b.conn.BusObject().Call("org.freedesktop.DBus.NameHasOwner", 0, busName).Store(&owned); err != nil {
 		b.reset("notification not shown, the session bus did not answer: %v", err)
@@ -136,8 +121,7 @@ func (b *bus) send(notice Notice) {
 		// Transient keeps device switches out of the notification history.
 		"transient": dbus.MakeVariant(true),
 		"category":  dbus.MakeVariant("device"),
-		// dunst and the servers derived from Ubuntu's notify-osd replace
-		// by tag, which covers a server that ignores replaces_id.
+		// dunst and notify-osd derivatives replace by tag, not replaces_id.
 		"x-dunst-stack-tag":               dbus.MakeVariant("poweraudio"),
 		"x-canonical-private-synchronous": dbus.MakeVariant("poweraudio"),
 	}

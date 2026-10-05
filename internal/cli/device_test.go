@@ -29,8 +29,7 @@ func TestFindDevice(t *testing.T) {
 		{name: "by MAC address", query: "3c:b0:ed:3a:2c:42", wantID: "sink.jbl"},
 		{name: "unique substring", query: "tune", wantID: "sink.jbl.tune"},
 		{name: "substring of the MAC address", query: "3c:b0", wantID: "sink.jbl"},
-		// "jbl" is a substring of two devices, so without the exact name
-		// rule the shorter device would be unreachable.
+		// "jbl" is a substring of two devices, so the exact name must win.
 		{name: "exact beats substring", query: "jbl", wantID: "sink.jbl"},
 		{name: "surrounding space", query: "  tune  ", wantID: "sink.jbl.tune"},
 		{
@@ -76,7 +75,6 @@ func TestFindDeviceWithNoDevices(t *testing.T) {
 	}
 }
 
-// sink is a device in whatever state a next test needs.
 func sink(id string, isDefault, available bool) audio.Device {
 	return audio.Device{ID: id, Name: id, IsDefault: isDefault, Available: available}
 }
@@ -265,8 +263,6 @@ func TestTargetDevice(t *testing.T) {
 		t.Errorf("targetDevice = %q, want the device the query names", dev.Name)
 	}
 
-	// Nothing is default while the daemon is between switches, and a command
-	// with no query has nothing to act on.
 	headless := ipc.Snapshot{Devices: []audio.Device{{ID: "a", Name: "a"}}}
 	if _, err := targetDevice(&headless, ""); err == nil {
 		t.Error("targetDevice with no default succeeded, want an error")

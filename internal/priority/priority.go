@@ -1,8 +1,5 @@
-// Package priority ranks audio devices against the user's ordered list of
-// priority entries. The daemon uses it to pick a fallback and to decide
-// whether a connecting device outranks the current one; the UI uses it to
-// show which entries are present and which devices are still unranked. Both
-// go through the same functions so the two never disagree about a match.
+// Package priority ranks devices against the user's priority list. The
+// daemon and the UI share it so they never disagree about a match.
 package priority
 
 import (
@@ -12,16 +9,12 @@ import (
 	"github.com/roverflow/poweraudio/internal/config"
 )
 
-// Matches reports whether entry describes dev. The match string is a
-// case-insensitive substring of the device's name, description or MAC
-// address. An entry that also sets a type requires the device's detected type
-// to equal it.
+// Matches reports whether entry's match string is a case-insensitive
+// substring of dev's name, description or MAC, and any set type agrees.
 func Matches(dev audio.Device, entry config.PriorityEntry) bool {
 	match := strings.ToLower(strings.TrimSpace(entry.Match))
 	if match == "" {
-		// strings.Contains is true for the empty string, so an entry with no
-		// match key used to claim every device and quietly outrank the rest
-		// of the list.
+		// strings.Contains matches "", so an empty key matches every device.
 		return false
 	}
 	if entry.Type != "" && !strings.EqualFold(entry.Type, dev.Type.String()) {
@@ -36,9 +29,7 @@ func Matches(dev audio.Device, entry config.PriorityEntry) bool {
 		(mac != "" && strings.Contains(mac, match))
 }
 
-// Rank is the position of the first entry that matches dev, so lower is
-// better. A device no entry matches ranks len(entries), below everything on
-// the list.
+// Rank is the index of the first entry matching dev, or len(entries).
 func Rank(dev audio.Device, entries []config.PriorityEntry) int {
 	for i, entry := range entries {
 		if Matches(dev, entry) {
@@ -48,15 +39,8 @@ func Rank(dev audio.Device, entries []config.PriorityEntry) int {
 	return len(entries)
 }
 
-// Best walks the ranking top down and returns the first usable device an
-// entry matches. When nothing on the list is present it returns the first
-// usable hardware device, and nil when there is none.
-//
-// The "Dummy Output" placeholder is never returned, even when an entry names
-// it: PipeWire refuses to make it the default and nothing plays through it. A
-// virtual sink, such as an EasyEffects chain, a null sink or an AirPlay
-// speaker, is returned only when the ranking names it, since audio sent there
-// goes nowhere on its own or plays in another room.
+// Best returns the first usable device in ranking order, else the first
+// usable non-virtual device, else nil. Virtual sinks need an entry.
 func Best(devices []audio.Device, entries []config.PriorityEntry) *audio.Device {
 	for _, entry := range entries {
 		for i := range devices {
@@ -73,8 +57,7 @@ func Best(devices []audio.Device, entries []config.PriorityEntry) *audio.Device 
 	return nil
 }
 
-// Present reports whether a device that can play matches entry. The green dot
-// uses this, so a sink whose port is not available does not count as plugged in.
+// Present reports whether a device that can play matches entry.
 func Present(entry config.PriorityEntry, devices []audio.Device) bool {
 	for _, dev := range devices {
 		if dev.Usable() && Matches(dev, entry) {

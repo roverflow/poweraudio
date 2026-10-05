@@ -90,7 +90,6 @@ func TestDetailRowsDescribeTheSelectedDevice(t *testing.T) {
 		t.Errorf("a sink that cannot play says nothing about it:\n%s", joined)
 	}
 
-	// A device no entry matches says so rather than claiming the bottom rank.
 	unranked := audio.Device{ID: "x", Name: "Webcam Audio", Description: "alsa_output.webcam"}
 	rows = detailRows(unranked, 40, entries, 90)
 	if joined = stripANSI(strings.Join(rows, "\n")); !strings.Contains(joined, "not on the priority list") {
@@ -98,8 +97,6 @@ func TestDetailRowsDescribeTheSelectedDevice(t *testing.T) {
 	}
 }
 
-// The panel follows the cursor, which is the only way to inspect a device
-// other than the one that happens to be playing.
 func TestDetailPanelFollowsTheCursor(t *testing.T) {
 	m := testDevicesModel(90, 30)
 	if !m.showPanel() {
@@ -170,8 +167,6 @@ func TestVolumeKeysMoveTheBarImmediately(t *testing.T) {
 	}
 }
 
-// A snapshot arriving between the keypress and the answer used to redraw the
-// bar at the daemon's older level, so the level appeared to jump backwards.
 func TestSnapshotDoesNotDragThePendingLevelBack(t *testing.T) {
 	snap := testSnapshot()
 	m := testDevicesModel(90, 30)

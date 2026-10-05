@@ -17,8 +17,6 @@ func TestTruncate(t *testing.T) {
 		{"Razer", 1, "…"},
 		{"Razer", 0, ""},
 		{"Razer", -1, ""},
-		// Runes, not bytes: cutting a multi-byte name by bytes would leave a
-		// broken character behind and corrupt the row.
 		{"Écouteurs Bluetooth", 6, "Écout…"},
 		{"", 5, ""},
 	}

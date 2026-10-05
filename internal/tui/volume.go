@@ -3,15 +3,12 @@ package tui
 import "time"
 
 const (
-	// volumeDebounce is the quiet period an edit waits out before the UI
-	// sends it. A held arrow key repeats far faster than a round trip to the
-	// daemon, and one request per repeat used to queue up behind itself until
-	// the bar crawled seconds behind the key.
+	// volumeDebounce is the quiet period before the UI sends an edit. A held
+	// key repeats faster than a daemon round trip.
 	volumeDebounce = 60 * time.Millisecond
 
-	// volumeHold is how long the locally edited level wins over the value in
-	// the snapshot when no snapshot ever confirms the change. Without the
-	// deadline a request the daemon silently dropped would freeze the bar.
+	// volumeHold caps how long a local edit overrides the snapshot, so a
+	// request the daemon dropped cannot freeze the bar.
 	volumeHold = 2 * time.Second
 
 	volumeMin  = 0
@@ -20,9 +17,8 @@ const (
 	volumeFine = 1
 )
 
-// volumeAction is what the caller has to do after a state transition. The
-// state machine owns the decision; the model owns the commands, so the whole
-// coalescing rule is testable without a daemon or a clock.
+// volumeAction tells the model which command to issue, which keeps the
+// state machine testable without a daemon or a clock.
 type volumeAction int
 
 const (
@@ -35,16 +31,14 @@ const (
 	volumeSend
 )
 
-// volumeState coalesces volume edits into at most one request per quiet
-// period, with never more than one in flight. The level shown on screen is
-// the edited one from the first keypress, so the bar tracks the key and never
-// jumps backwards to a value the daemon has not caught up with yet.
+// volumeState coalesces edits into at most one request per quiet period,
+// with at most one in flight. The bar shows the local level meanwhile.
 type volumeState struct {
 	id      string
 	percent int
 
-	// seq invalidates the timer of an edit that has already been superseded,
-	// since a tea.Tick cannot be cancelled once it is out.
+	// seq invalidates the timer of a superseded edit, since a tea.Tick cannot
+	// be cancelled once it is out.
 	seq int
 
 	armed    bool
@@ -68,7 +62,6 @@ func clampVolume(percent int) int {
 	return percent
 }
 
-// edit records a new local level for a device and reports what to do next.
 func (v *volumeState) edit(id string, percent int, now time.Time) volumeAction {
 	if v.id != id {
 		// Moving to another device abandons the previous edit, but the seq
@@ -103,9 +96,8 @@ func (v *volumeState) fire(seq int) volumeAction {
 	return volumeSend
 }
 
-// done runs when a request comes back. A level edited while the request was
-// out re-arms the timer instead of going straight back out, so holding a key
-// still costs one request per quiet period rather than one per round trip.
+// done re-arms the timer for an edit made while the request was out, so a
+// held key costs one request per quiet period, not one per round trip.
 func (v *volumeState) done() volumeAction {
 	v.inflight = false
 	if v.dirty {
@@ -122,16 +114,15 @@ func (v *volumeState) done() volumeAction {
 	return volumeNothing
 }
 
-// snapshot releases the local level once a finished request has been followed
-// by a fresh snapshot, which is the first one that can contain the new value.
+// snapshot releases the local level once a snapshot follows a finished
+// request, since that is the first one that can hold the new value.
 func (v *volumeState) snapshot() {
 	if v.settled {
 		*v = volumeState{seq: v.seq}
 	}
 }
 
-// level is the percentage to draw for a device, and whether there is a local
-// edit to draw at all.
+// level reports the local edit for id, if there is one to draw.
 func (v *volumeState) level(id string, now time.Time) (int, bool) {
 	if v.id == "" || v.id != id || now.After(v.holdTo) {
 		return 0, false

@@ -8,10 +8,7 @@ import (
 	"strings"
 )
 
-// SubscribeEvents follows `pactl subscribe`, which reports sinks appearing and
-// going away as they happen. The daemon's timers exist for the case where this
-// says nothing, so a slow adapter still lands eventually, but on a normal
-// machine the switch happens on the line this reads.
+// SubscribeEvents follows `pactl subscribe` for sink and server changes.
 func (b *pactlBackend) SubscribeEvents(ctx context.Context) (<-chan Event, error) {
 	cmd := exec.CommandContext(ctx, "pactl", "subscribe")
 	stdout, err := cmd.StdoutPipe()
@@ -41,13 +38,8 @@ func (b *pactlBackend) SubscribeEvents(ctx context.Context) (<-chan Event, error
 	return ch, nil
 }
 
-// parsePactlEvent reads a line of `pactl subscribe` output, which looks like
-//
-//	Event 'change' on sink #73
-//
-// Only sinks and the server matter here. Matching the facility by substring
-// meant every sink-input event counted as a change to the outputs, and an
-// application starting or stopping playback emits those constantly.
+// parsePactlEvent reads a line such as "Event 'change' on sink #73". The
+// facility must match exactly, or sink-input events count as sink changes.
 func parsePactlEvent(line string) (Event, bool) {
 	fields := strings.Fields(line)
 	if len(fields) < 4 || fields[0] != "Event" {

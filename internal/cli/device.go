@@ -13,8 +13,7 @@ import (
 	"github.com/roverflow/poweraudio/internal/priority"
 )
 
-// The range the backends accept. Above 100 is software gain, which PipeWire
-// allows and most hardware turns into distortion, so 150 is where it stops.
+// Above 100 is PipeWire software gain, which most hardware distorts.
 const (
 	minVolume = 0
 	maxVolume = 150
@@ -28,11 +27,8 @@ const (
 	matchExact
 )
 
-// findDevice resolves a user's query to exactly one device. An exact match on
-// any field wins outright, so a device whose name is a substring of another
-// one can still be named. Failing that the query has to be a substring of one
-// device and one only, because switching the output to whichever candidate
-// happened to be listed first is worse than refusing.
+// findDevice resolves a query to one device. An exact match on any field
+// wins over substrings, and an ambiguous query is an error, not a guess.
 func findDevice(devices []audio.Device, query string) (*audio.Device, error) {
 	q := strings.ToLower(strings.TrimSpace(query))
 	if q == "" {
@@ -66,9 +62,6 @@ func findDevice(devices []audio.Device, query string) (*audio.Device, error) {
 	return nil, fmt.Errorf("no device matches %q (devices: %s)", query, deviceNames(devices, indexes(devices)))
 }
 
-// classify reports how well q describes dev. Every field is checked before
-// settling for a partial match, so an exact hit on the MAC address is not
-// lost to a substring of the name.
 func classify(dev audio.Device, q string) matchKind {
 	kind := matchNone
 	for _, field := range []string{dev.ID, dev.Name, dev.Description, dev.MACAddress} {
@@ -106,15 +99,9 @@ func indexes(devices []audio.Device) []int {
 	return all
 }
 
-// nextDevice is the device after the current default in list order, wrapping
-// past the end and skipping anything that cannot play. With no default it
-// starts from the top of the list, which is what a first press of the media
-// key should do.
-//
-// The "Dummy Output" placeholder is never a stop, and neither is a virtual
-// sink such as a null sink or an EasyEffects chain unless the ranking names
-// it. Cycling through those meant pressing the key two or three extra times
-// to get from the speakers to the headset.
+// nextDevice is the next playable device after the default, wrapping
+// around. It skips virtual sinks the ranking does not name, such as
+// EasyEffects chains.
 func nextDevice(devices []audio.Device, ranking []config.PriorityEntry) (*audio.Device, error) {
 	n := len(devices)
 	if n == 0 {
@@ -142,8 +129,6 @@ func nextDevice(devices []audio.Device, ranking []config.PriorityEntry) (*audio.
 	return nil, errors.New("no other output can play right now")
 }
 
-// targetDevice is the device a command acts on: the one the query names, or
-// the current default when there is no query.
 func targetDevice(snap *ipc.Snapshot, query string) (*audio.Device, error) {
 	if query != "" {
 		return findDevice(snap.Devices, query)
@@ -163,8 +148,7 @@ func deviceByID(devices []audio.Device, id string) *audio.Device {
 	return nil
 }
 
-// volumeSpec is a parsed volume argument. A leading sign makes it relative to
-// whatever the device is at now, anything else is an absolute percentage.
+// volumeSpec is a parsed volume argument. A leading sign makes it relative.
 type volumeSpec struct {
 	value    int
 	relative bool
@@ -184,9 +168,6 @@ func parseVolumeSpec(arg string) (volumeSpec, error) {
 	return volumeSpec{value: n, relative: relative}, nil
 }
 
-// apply resolves the spec against the device's current level and clamps it,
-// so "volume -20" on a device at 10 percent lands on zero instead of asking
-// the backend for something it would reject.
 func (v volumeSpec) apply(current int) int {
 	target := v.value
 	if v.relative {
@@ -205,7 +186,6 @@ func clampVolume(percent int) int {
 	return percent
 }
 
-// volumePercent converts the backend's 0.0 to 1.5 scale to whole percent.
 func volumePercent(volume float64) int {
 	return int(math.Round(volume * 100))
 }

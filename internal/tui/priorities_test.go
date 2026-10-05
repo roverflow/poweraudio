@@ -36,9 +36,6 @@ func TestTypeLabelIsTheSameOnBothLists(t *testing.T) {
 	}
 }
 
-// The UI compared names exactly while the daemon matched a substring, so a
-// hand-written entry like "razer" switched correctly and still showed the
-// headset as unranked with no presence dot.
 func TestBothListsUseTheSharedMatcher(t *testing.T) {
 	m := testConfigModel(90, 20)
 

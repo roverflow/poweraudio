@@ -13,10 +13,8 @@ import (
 	"github.com/roverflow/poweraudio/internal/version"
 )
 
-// Handle answers one request. The server calls it on the connection's own
-// goroutine, so a volume step no longer queues behind whatever the event loop
-// is doing; the locks below are what keeps the state consistent instead.
-// Subscribe is not handled here because it is a stream, not an answer.
+// Handle answers one request. It runs on the connection's goroutine, not the
+// event loop. Subscribe is served separately.
 func (d *Daemon) Handle(ctx context.Context, req ipc.Request) ipc.Response {
 	switch req.Method {
 	case ipc.MethodSnapshot:
@@ -94,9 +92,7 @@ func (d *Daemon) Handle(ctx context.Context, req ipc.Request) ipc.Response {
 	}
 }
 
-// Snapshot is the daemon's visible state at one moment: the sink list, who it
-// is and where it reads its config, every retained event oldest first, and the
-// running config.
+// Snapshot is the daemon's visible state at one moment.
 func (d *Daemon) Snapshot() ipc.Snapshot {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -121,9 +117,8 @@ func (d *Daemon) Snapshot() ipc.Snapshot {
 	}
 }
 
-// saveResponse reports a failed write as a failure. The change is already
-// live either way, but saying OK while the file went untouched meant the UI
-// showed "saved" over a config that would be gone at the next restart.
+// saveResponse fails when the write fails, even though the change is live,
+// so the UI does not show "saved" for a config a restart would lose.
 func (d *Daemon) saveResponse(cfg config.Config) ipc.Response {
 	if err := d.saveConfig(cfg); err != nil {
 		msg := fmt.Sprintf("saving %s: %v", config.ResolvePath(d.configPath), err)
@@ -133,8 +128,7 @@ func (d *Daemon) saveResponse(cfg config.Config) ipc.Response {
 	return ipc.SuccessResponse(nil)
 }
 
-// saveConfig writes the config file and remembers the mtime it left, so the
-// watcher in runEvents can tell this write apart from an edit by hand.
+// saveConfig records the file's mtime so the config watcher skips this save.
 func (d *Daemon) saveConfig(cfg config.Config) error {
 	d.saveMu.Lock()
 	defer d.saveMu.Unlock()

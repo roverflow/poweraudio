@@ -16,6 +16,7 @@ import (
 	"github.com/roverflow/poweraudio/internal/bluetooth"
 	"github.com/roverflow/poweraudio/internal/config"
 	"github.com/roverflow/poweraudio/internal/ipc"
+	"github.com/roverflow/poweraudio/internal/razer"
 )
 
 func TestFindBTDevice(t *testing.T) {
@@ -38,7 +39,6 @@ func TestFindBTDevice(t *testing.T) {
 		t.Errorf("name lookup picked %v, want the first matching sink", got)
 	}
 
-	// A speaker whose name happens to match is not a Bluetooth device.
 	if got := findBTDevice(devices, "", "Ryzen"); got != nil {
 		t.Errorf("matched a non-Bluetooth sink: %v", got)
 	}
@@ -50,8 +50,7 @@ func TestFindBTDevice(t *testing.T) {
 	}
 }
 
-// The pactl event carries a pulse index and the sink list is keyed by name, so
-// the log has to work the name out by diffing the list.
+// The pactl event carries only a pulse index, so the log diffs the list.
 func TestSinkEventsLogDeviceNames(t *testing.T) {
 	backend := &stubBackend{devices: []audio.Device{
 		{ID: "alsa_output.pci-0000_00_1f.3.analog-stereo", Name: "Built-in Audio", Available: true},
@@ -87,7 +86,6 @@ func TestSinkEventsLogDeviceNames(t *testing.T) {
 		t.Errorf("sink removed logged %q, want the name of the sink that vanished", last.Message)
 	}
 
-	// Nothing moved, so there is nothing to say.
 	before := len(d.Snapshot().Events)
 	d.handleAudioEvent(ctx, audio.Event{Type: audio.EventSinkAdded, DeviceID: "1648"})
 	if got := d.Snapshot().Events[before:]; len(got) != 0 {
@@ -95,8 +93,7 @@ func TestSinkEventsLogDeviceNames(t *testing.T) {
 	}
 }
 
-// The Bluetooth handler reads the list before pactl's remove event arrives, so
-// diffing around the event found nothing and logged "sink removed: 942".
+// The Bluetooth handler reads the list before pactl's remove event arrives.
 func TestSinkNamedWhenAnEarlierReadSawItGo(t *testing.T) {
 	backend := &stubBackend{current: "ryzen", devices: []audio.Device{
 		{ID: "ryzen", Name: "Ryzen", Available: true},
@@ -144,8 +141,7 @@ func TestUnavailableDefaultFallsBack(t *testing.T) {
 	ctx := context.Background()
 	d.refreshDevices(ctx)
 
-	// A port going empty arrives as a sink change. The event loop collapses
-	// the burst, then makes the same call.
+	// A port going empty arrives as a sink change, which ends in this call.
 	backend.setAvailable("barracuda", false)
 	d.refreshSettled(ctx)
 
@@ -167,7 +163,7 @@ func TestStartupLeavesAPortThatIsAlreadyDown(t *testing.T) {
 }
 
 func TestUnknownPortStaysTheDefault(t *testing.T) {
-	// availability unknown is stored as Available. A refresh must not move it.
+	// The backend stores unknown availability as Available.
 	backend := rankedSinks(t, "barracuda")
 	d := rankedDaemon(t, backend)
 	ctx := context.Background()
@@ -262,6 +258,68 @@ func TestEarcupsOnLeavesTheOutputWhenConnectIsNever(t *testing.T) {
 	}
 }
 
+// The dongle reports the earcups only when they change.
+func TestRestartRemembersEarcupsOff(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "poweraudio-earcups")
+	ctx := context.Background()
+
+	backend := barracudaSinks(t, "ryzen")
+	first := rankedDaemon(t, backend)
+	first.rememberEarcups(state)
+	first.refreshDevices(ctx)
+	first.handleEarcups(ctx, false)
+
+	backend.add(jbl())
+	backend.setCurrent(jblID)
+	second := rankedDaemon(t, backend)
+	second.rememberEarcups(state)
+	second.refreshDevices(ctx)
+
+	backend.remove(jblID)
+	disconnect(ctx, second, jblMAC, "JBL Tune 520BT")
+
+	if got := backend.defaultID(); got != "ryzen" {
+		t.Errorf("default = %q, want the speakers, not the headset that is off", got)
+	}
+}
+
+func TestRememberedEarcupsOnDoesNotSwitch(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "poweraudio-earcups")
+	if err := razer.SaveState(state, true); err != nil {
+		t.Fatal(err)
+	}
+	backend := barracudaSinks(t, "ryzen")
+	d := rankedDaemon(t, backend)
+	d.rememberEarcups(state)
+	d.refreshDevices(context.Background())
+	d.refreshSettled(context.Background())
+
+	if got := backend.defaultID(); got != "ryzen" {
+		t.Errorf("default = %q, want it left alone", got)
+	}
+	for _, dev := range d.GetDevices() {
+		if dev.ID == "barracuda" && !dev.Available {
+			t.Error("the headset remembered as on is not available")
+		}
+	}
+}
+
+func TestEarcupReportsAreSaved(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "poweraudio-earcups")
+	backend := barracudaSinks(t, "ryzen")
+	d := rankedDaemon(t, backend)
+	d.rememberEarcups(state)
+	ctx := context.Background()
+	d.refreshDevices(ctx)
+
+	for _, want := range []bool{true, false} {
+		d.handleEarcups(ctx, want)
+		if on, _, ok := razer.LoadState(state); !ok || on != want {
+			t.Errorf("after a report of %v the file says on=%v ok=%v", want, on, ok)
+		}
+	}
+}
+
 func barracudaSinks(t *testing.T, current string) *stubBackend {
 	t.Helper()
 	return &stubBackend{
@@ -303,8 +361,6 @@ func rankedDaemon(t *testing.T, backend *stubBackend) *Daemon {
 	return New(cfg, backend, filepath.Join(t.TempDir(), "config.toml"))
 }
 
-// Headset A waiting for its sink used to be forgotten the moment unrelated
-// headset B disconnected.
 func TestDisconnectOfAnotherDeviceKeepsPending(t *testing.T) {
 	backend := &stubBackend{
 		devices: []audio.Device{{ID: "1", Name: "Speakers", Available: true}},
@@ -329,7 +385,6 @@ func TestDisconnectOfAnotherDeviceKeepsPending(t *testing.T) {
 		t.Fatal("an unrelated disconnect dropped the device that was still waiting for its sink")
 	}
 
-	// The device being waited on is the one that cancels the wait.
 	d.handleBluetoothEvent(ctx, bluetooth.Event{
 		MACAddress: "aa:bb:cc:dd:ee:ff",
 		DeviceName: "Headset A",
@@ -339,7 +394,6 @@ func TestDisconnectOfAnotherDeviceKeepsPending(t *testing.T) {
 	}
 }
 
-// Editing the config by hand should take effect without a restart.
 func TestConfigWatchReloadsRewrittenFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
@@ -361,8 +415,7 @@ func TestConfigWatchReloadsRewrittenFile(t *testing.T) {
 	d := New(cfg, &stubBackend{}, path)
 	go d.runEvents(ctx, sources{})
 
-	// The watch compares mtimes, so the rewrite has to land after the first
-	// poll has read the original one.
+	// The watch compares mtimes, so rewrite only after the first poll.
 	time.Sleep(50 * time.Millisecond)
 	cfg.Switching.OnConnect = "never"
 	if err := config.Save(path, cfg); err != nil {
@@ -380,7 +433,6 @@ func TestConfigWatchReloadsRewrittenFile(t *testing.T) {
 		d.Config().Switching.OnConnect)
 }
 
-// A parse error leaves the daemon running on what it already had.
 func TestConfigWatchKeepsRunningConfigOnParseError(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
@@ -432,7 +484,6 @@ func TestLogLevelFiltersStderrNotTheRing(t *testing.T) {
 		t.Errorf("log_level=warn dropped a warning: %q", stderr)
 	}
 
-	// The status screen shows what the daemon did, whatever the level.
 	events := d.Snapshot().Events
 	if len(events) != 3 {
 		t.Fatalf("the ring kept %d events, want all 3", len(events))
@@ -453,8 +504,6 @@ func TestLogLevelFiltersStderrNotTheRing(t *testing.T) {
 	}
 }
 
-// Saving is what makes a choice survive a restart, so a failed save is not a
-// success no matter how the change went in memory.
 func TestUpdatePrioritiesReportsSaveFailure(t *testing.T) {
 	dir := t.TempDir()
 	blocker := filepath.Join(dir, "not-a-directory")
@@ -480,7 +529,6 @@ func TestUpdatePrioritiesReportsSaveFailure(t *testing.T) {
 		t.Errorf("error = %q, want it to name the file it could not write", resp.Error)
 	}
 
-	// The running daemon still behaves the way the user asked.
 	got := d.Config().Priority
 	if len(got) != 1 || got[0].Match != "JBL" {
 		t.Errorf("in-memory priorities = %+v, want the entry that was sent", got)
@@ -511,8 +559,7 @@ func lastEvent(t *testing.T, d *Daemon) ipc.EventLog {
 	return events[len(events)-1]
 }
 
-// lockedBuffer collects what the standard logger writes. The daemon logs from
-// several goroutines, and a plain bytes.Buffer races under -race.
+// lockedBuffer is a bytes.Buffer safe for the logger's concurrent writes.
 type lockedBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer

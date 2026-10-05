@@ -2,26 +2,20 @@ package cli
 
 import "strings"
 
-// flagSpec is the set of flags one command accepts. Commands declare it so an
-// unknown flag is an error rather than a device query nobody matches.
 type flagSpec struct {
 	json   bool
 	device bool
 	notify bool
 }
 
-// options is what a command line asked for beyond its positional arguments.
 type options struct {
 	json   bool
 	device string
 	notify bool
 }
 
-// parseOptions splits args into the flags a command accepts and everything
-// else. The flag package is not used here because it reads the "-10" of
-// "poweraudio volume -10" as an unknown flag rather than a relative level,
-// and lowering the volume from a media key is most of the point of this
-// command set.
+// parseOptions avoids the flag package, which reads the -10 in
+// "poweraudio volume -10" as an unknown flag.
 func parseOptions(cmd string, args []string, spec flagSpec) ([]string, options, error) {
 	var (
 		positional []string
@@ -32,8 +26,7 @@ func parseOptions(cmd string, args []string, spec flagSpec) ([]string, options, 
 		arg := args[i]
 		switch {
 		case arg == "--":
-			// Everything after a bare double dash is a query, which is how a
-			// device named "--something" can still be selected.
+			// Everything after "--" is a query, even "--something".
 			positional = append(positional, args[i+1:]...)
 			return positional, opts, nil
 
@@ -67,8 +60,6 @@ func parseOptions(cmd string, args []string, spec flagSpec) ([]string, options, 
 	return positional, opts, nil
 }
 
-// expectNoArgs rejects the leftovers of a command that takes none, so a
-// mistyped flag does not silently do nothing.
 func expectNoArgs(cmd string, positional []string) error {
 	if len(positional) > 0 {
 		return usagef("%s takes no arguments, got %q", cmd, positional[0])
@@ -76,8 +67,6 @@ func expectNoArgs(cmd string, positional []string) error {
 	return nil
 }
 
-// expectOneArg returns the single positional argument a command needs. want
-// describes it for the error message.
 func expectOneArg(cmd, want string, positional []string) (string, error) {
 	switch {
 	case len(positional) == 0:

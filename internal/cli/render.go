@@ -13,17 +13,11 @@ import (
 )
 
 const (
-	// eventTime is short because the interesting part of a switch is the
-	// second it happened on, not the date.
 	eventTime = "Jan 02 15:04:05"
 
-	// statusEvents is how much of the daemon's log the status command shows.
-	// The rest is what the terminal UI and journalctl are for.
 	statusEvents = 10
 )
 
-// renderList is the device table: a marker on the default, then name, type,
-// level and the id you would pass back to "set".
 func renderList(snap *ipc.Snapshot) string {
 	if len(snap.Devices) == 0 {
 		return "no output devices\n"
@@ -42,10 +36,8 @@ func renderList(snap *ipc.Snapshot) string {
 	return buf.String()
 }
 
-// renderStatus is the daemon at a glance followed by the tail of its log.
-// client is this command's own version, to compare with the daemon's. now is
-// a parameter rather than a call to time.Now so the uptime line is worth
-// testing.
+// renderStatus compares client, this binary's version, with the daemon's.
+// now is a parameter so tests can pin the uptime.
 func renderStatus(snap *ipc.Snapshot, client string, now time.Time) string {
 	var buf bytes.Buffer
 
@@ -66,8 +58,7 @@ func renderStatus(snap *ipc.Snapshot, client string, now time.Time) string {
 		fmt.Fprintf(tw, "warning\t%s\n", problem)
 	}
 	if daemon := snap.Status.Version; daemon != "" && client != "" && daemon != client {
-		// `make install` replaces the binary but leaves the old daemon
-		// running, so the fix just installed is not the one in effect.
+		// `make install` leaves the old daemon running.
 		fmt.Fprintf(tw, "warning\tthe daemon is %s and this command is %s, run: systemctl --user restart poweraudio\n", daemon, client)
 	}
 	fmt.Fprintf(tw, "config\t%s\n", snap.Status.ConfigPath)
@@ -91,7 +82,6 @@ func renderStatus(snap *ipc.Snapshot, client string, now time.Time) string {
 	return buf.String()
 }
 
-// watchLine is one snapshot reduced to what a status bar draws.
 func watchLine(snap ipc.Snapshot) string {
 	def := snap.Default()
 	if def == nil {
@@ -107,8 +97,6 @@ func volumeLabel(dev audio.Device) string {
 	return fmt.Sprintf("%d%%", volumePercent(dev.Volume))
 }
 
-// tailEvents is the last n events, oldest first, so the newest line is the
-// one nearest the prompt.
 func tailEvents(events []ipc.EventLog, n int) []ipc.EventLog {
 	if len(events) <= n {
 		return events
@@ -116,9 +104,6 @@ func tailEvents(events []ipc.EventLog, n int) []ipc.EventLog {
 	return events[len(events)-n:]
 }
 
-// uptime is how long the daemon has been up, in the largest two units that
-// say anything. A daemon that has not reported a start time reads as unknown
-// rather than as decades of uptime.
 func uptime(startedAt, now time.Time) string {
 	if startedAt.IsZero() {
 		return "unknown"
@@ -150,8 +135,6 @@ func newTable(w io.Writer) *tabwriter.Writer {
 	return tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 }
 
-// writeJSON prints a value for another program to read. Indented because the
-// commands that use it print one document and exit, unlike watch.
 func writeJSON(out io.Writer, v any) error {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {

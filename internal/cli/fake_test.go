@@ -12,12 +12,10 @@ import (
 	"github.com/roverflow/poweraudio/internal/ipc"
 )
 
-// started is the daemon start time in the fixture snapshot. Tests that render
-// an uptime pass an explicit "now" relative to it.
 var started = time.Date(2026, 9, 18, 9, 0, 0, 0, time.UTC)
 
-// fixture is the snapshot every test renders against: three devices with a
-// Bluetooth default, one of them unavailable and muted, and a short log.
+// fixture has three devices with a Bluetooth default, one unavailable and
+// muted, and a short log.
 func fixture() ipc.Snapshot {
 	return ipc.Snapshot{
 		Devices: []audio.Device{
@@ -62,8 +60,7 @@ func fixture() ipc.Snapshot {
 	}
 }
 
-// fakeClient stands in for the daemon. It hands out canned snapshots, records
-// every request and can fail the way a missing socket does.
+// fakeClient hands out canned snapshots and records every request.
 type fakeClient struct {
 	snaps  []ipc.Snapshot
 	nth    int
@@ -79,8 +76,7 @@ func newFake(snaps ...ipc.Snapshot) *fakeClient {
 	return &fakeClient{snaps: snaps}
 }
 
-// downFake fails every call the way dialling a socket with nothing behind it
-// does, which is the case every command has to report the same way.
+// downFake fails every call the way an unanswered socket dial does.
 func downFake() *fakeClient {
 	return &fakeClient{err: &net.OpError{
 		Op:  "dial",
@@ -93,8 +89,7 @@ func (f *fakeClient) record(format string, a ...any) {
 	f.calls = append(f.calls, fmt.Sprintf(format, a...))
 }
 
-// Snapshot walks the canned list, repeating the last one once it runs out, so
-// a command that reads state back sees the second snapshot it was given.
+// Snapshot repeats the last canned snapshot once the list runs out.
 func (f *fakeClient) Snapshot() (*ipc.Snapshot, error) {
 	f.record("snapshot")
 	if f.err != nil {

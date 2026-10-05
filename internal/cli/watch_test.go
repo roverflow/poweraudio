@@ -9,8 +9,7 @@ import (
 	"github.com/roverflow/poweraudio/internal/ipc"
 )
 
-// streamOf is a closed channel already holding every snapshot, which is the
-// daemon sending a burst and then going away.
+// streamOf mimics a daemon that sends a burst and goes away.
 func streamOf(snaps ...ipc.Snapshot) chan ipc.Snapshot {
 	ch := make(chan ipc.Snapshot, len(snaps))
 	for _, snap := range snaps {
@@ -26,8 +25,7 @@ func TestWatchPrintsOneLinePerChange(t *testing.T) {
 	muted := fixture()
 	muted.Devices[1].Muted = true
 
-	// The middle snapshot repeats the first one, which is what a logged event
-	// with no audible change looks like.
+	// The repeat mimics a logged event with no audible change.
 	stream := streamOf(fixture(), fixture(), quiet, muted)
 
 	var out bytes.Buffer
@@ -66,8 +64,7 @@ func TestWatchStopsQuietlyOnASignal(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	// A cancelled context is the signal handler having fired, and the stream
-	// closing after it is not a failure.
+	// A cancelled ctx means a signal fired, so a closed stream is no error.
 	var out bytes.Buffer
 	if err := watch(ctx, streamOf(), &out, false); err != nil {
 		t.Errorf("watch returned %v, want nil after a signal", err)

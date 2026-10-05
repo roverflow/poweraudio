@@ -1,63 +1,49 @@
-# poweraudio configuration
-#
-# Lives at ~/.config/poweraudio/config.toml and is written on first run.
-# The daemon reads it at startup and reloads it on its own when the file
-# changes, so editing by hand needs no restart.
-#
-# Saving from the terminal UI rewrites this file from the daemon's in-memory
-# config, which drops any comments you added.
+# poweraudio configuration, read from ~/.config/poweraudio/config.toml.
+# The daemon reloads it when it changes. Saving from the UI drops comments.
 
 [general]
-# Kept for older configs. Every value means the same thing now: the daemon
-# talks to PipeWire and PulseAudio alike through pactl, and reports which one
-# it found on the status screen.
+# Kept for older configs. Every value does the same thing.
 backend = "auto"
 
-# Lowest level written to stderr (and the journal): debug, info, warn, error.
-# The in-memory event log the UI shows keeps every level regardless.
+# Lowest level logged to stderr: debug, info, warn or error.
 log_level = "info"
 
-# Optional. Append the same log lines to this file as well.
+# Optional. Also append log lines to this file.
 # log_file = "/home/you/.local/state/poweraudio/daemon.log"
 
 [switching]
-# What a Bluetooth device connecting is allowed to do:
-#   "always"   take the output every time
-#   "priority" take it only when it outranks whatever is playing
-#   "never"    log the event, change nothing
+# When a Bluetooth device connects:
+#   "always"   switch to it every time
+#   "priority" switch to it only if it ranks above what is playing now
+#   "never"    log the event and change nothing
 on_connect = "always"
 
-# Where the output goes when the device you were listening on disappears:
-#   "priority" the highest ranked entry below that is present
-#   "previous" whatever was default before the daemon switched away
+# When the output you were using disappears:
+#   "priority" the highest ranked entry below that is still present
+#   "previous" whatever was the default before the daemon switched away
 on_disconnect = "priority"
 
-# Head start given to PipeWire to register the new sink before the daemon
-# goes looking for it. Missing sinks are retried for 15 seconds regardless.
+# Milliseconds to wait for PipeWire to add the new sink before looking.
 switch_delay_ms = 500
 
 [notifications]
-# Desktop notifications, sent to the desktop's notification server over D-Bus.
-# One notification at a time, replaced rather than stacked, and none during
-# login or while the machine sleeps.
+# Show desktop notifications over D-Bus: true or false.
 enabled = true
 
-# Notify when something other than poweraudio changes the default device,
-# such as the desktop's sound settings.
+# Notify when something else changes the default output: true or false.
 on_device_change = true
 
 [daemon]
-# Defaults to $XDG_RUNTIME_DIR/poweraudio.sock, created with mode 0600.
+# Defaults to $XDG_RUNTIME_DIR/poweraudio.sock.
 # socket_path = "/run/user/1000/poweraudio.sock"
 
 [tui]
-# Accepted but not used yet. Volume bars are always drawn.
+# Accepted but not used yet.
 show_volume = true
 
-# Fallback ranking, highest first. An entry matches a device when "match" is a
-# case-insensitive substring of its name, description or MAC address. Setting
-# "type" additionally requires the detected type to match: bluetooth, speaker,
-# headphone, hdmi, usb or unknown.
+# Fallback ranking, highest first. "match" is a case-insensitive substring
+# of the name, description or MAC address. "type" is optional: bluetooth,
+# speaker, headphone, hdmi, usb or unknown.
 #
 # [[priority]]
 # match = "JBL Tune 520BT"

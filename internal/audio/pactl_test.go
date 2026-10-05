@@ -2,15 +2,8 @@ package audio
 
 import "testing"
 
-// A capture of `pactl -f json list sinks` from a PipeWire 1.6.8 machine, cut
-// down to the properties this package reads and kept verbatim otherwise. Two
-// entries are hand written: pipewire-pulse only publishes a bluez5 sink while
-// headphones are connected, and nothing on this machine sets
-// device.form.factor, so neither path would ever be covered by a live capture.
-//
-// value_percent is the reason the sample stays literal. pactl writes it as
-// "40%", and decoding that into an int fails the whole document, which takes
-// the backend down rather than one sink.
+// A trimmed capture of `pactl -f json list sinks` from PipeWire 1.6.8. The
+// bluez5 and headset entries are hand written.
 const pactlSinksSample = `[
   {
     "index": 68,
@@ -154,8 +147,6 @@ func TestDeviceAvailabilityFollowsTheActivePort(t *testing.T) {
 			want: true,
 		},
 		{
-			// The motherboard card keeps the sink. Line out is where sound
-			// goes, so the empty headphone jack does not take the card away.
 			name: "line out playing, headphone jack empty",
 			sink: pactlSink{
 				ActivePort: "analog-output-lineout",
@@ -186,9 +177,7 @@ func TestDeviceAvailabilityFollowsTheActivePort(t *testing.T) {
 			want: false,
 		},
 		{
-			// The Barracuda X dongle has no jack sense. It reports unknown
-			// while the earcups are on and while they are off, so unknown
-			// has to stay usable.
+			// The Barracuda X reports unknown with the earcups on or off.
 			name: "dongle availability unknown",
 			sink: pactlSink{
 				ActivePort: "analog-output",
@@ -332,8 +321,7 @@ func TestClassify(t *testing.T) {
 			want: DeviceTypeBluetooth,
 		},
 		{
-			// A USB headset is a headphone first, because the priority list is
-			// written in terms of what you put on your head.
+			// Priority entries care what is on your head, not the bus.
 			name: "headset form factor beats the usb bus",
 			sink: pactlSink{Properties: map[string]string{"device.form.factor": "headset", "device.bus": "usb"}},
 			want: DeviceTypeHeadphone,
@@ -373,7 +361,6 @@ func TestClassify(t *testing.T) {
 			want: DeviceTypeHDMI,
 		},
 		{
-			// What a plain PulseAudio server leaves us: no properties at all.
 			name: "bluetooth by name alone",
 			sink: pactlSink{Description: "JBL Tune 520BT Bluetooth"},
 			want: DeviceTypeBluetooth,
@@ -507,7 +494,6 @@ func TestChannelVolume(t *testing.T) {
 			want: 0.45,
 		},
 		{
-			// Sorting the names is what makes this answer the same every time.
 			name: "channels that disagree pick the same one twice",
 			vol: map[string]pactlSinkVolume{
 				"front-left":  {ValuePercent: "30%"},
@@ -557,8 +543,6 @@ Server Version: 16.1`
 		info string
 		want string
 	}{
-		// pipewire-pulse names both servers on one line, so PipeWire has to
-		// win the match or every PipeWire machine reports as PulseAudio.
 		{"pipewire-pulse", pipewireInfo, "pipewire"},
 		{"pulseaudio proper", pulseInfo, "pulseaudio"},
 		{"no server name line", "Host Name: fedora\n", "pulseaudio"},
@@ -575,8 +559,7 @@ Server Version: 16.1`
 }
 
 func TestDetectRejectsUnknownBackend(t *testing.T) {
-	// The accepted values are not checked here, since every one of them ends
-	// up asking a real pactl whether a server is listening.
+	// Accepted values would run a real pactl, so only rejection is tested.
 	if _, err := Detect("jack"); err == nil {
 		t.Error("Detect should reject a backend name it does not know")
 	}
@@ -615,8 +598,6 @@ func TestVirtualSinks(t *testing.T) {
 	}
 }
 
-// PipeWire's AirPlay discovery creates a sink with no description for a
-// speaker that announces no name, and pactl prints that as "(null)".
 func TestDisplayNameFallsBackToSinkName(t *testing.T) {
 	cases := []struct {
 		desc, want string

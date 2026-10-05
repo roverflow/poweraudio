@@ -5,8 +5,6 @@ import (
 	"testing"
 )
 
-// The reference used to be sized by hand to a twenty-four row terminal, and
-// the Status section fell off the bottom as soon as it grew.
 func TestHelpFitsATwentyFourRowTerminal(t *testing.T) {
 	m := newHelpModel()
 	m.width, m.height = 90, 24-chromeLines

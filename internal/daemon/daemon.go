@@ -1,13 +1,11 @@
-// Package daemon is the long-running half of poweraudio. It watches BlueZ and
-// the audio backend, hands switching decisions to the engine this machine
-// supports, and serves the state a UI needs over a Unix socket. Everything a
-// client can ask for goes through Handle or Subscribe; the rest of the package
-// is unexported.
+// Package daemon watches BlueZ and the audio backend, decides where audio
+// output goes, and serves its state to UIs over a Unix socket.
 package daemon
 
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -25,69 +23,45 @@ import (
 )
 
 const (
-	// sinkChangeDebounce collapses the burst of change events pactl emits
-	// while a volume slider moves. Listing sinks for every one of them meant
-	// several subprocesses per volume step.
+	// sinkChangeDebounce collapses pactl's change burst during a volume drag.
 	sinkChangeDebounce = 200 * time.Millisecond
 
-	// pendingTTL is how long the daemon keeps looking for the audio sink of a
-	// device BlueZ has already reported as connected.
+	// pendingTTL bounds the wait for a connected Bluetooth device's sink.
 	pendingTTL = 15 * time.Second
 
-	// pendingRetryInterval is the safety net behind the sink-added event. If
-	// pactl subscribe is working the switch happens on the event instead.
+	// pendingRetryInterval polls in case the sink-added event never arrives.
 	pendingRetryInterval = 500 * time.Millisecond
 
-	// disconnectSettle gives the sink time to disappear before the daemon
-	// decides where the output should go instead.
 	disconnectSettle = 300 * time.Millisecond
 
-	// maxEvents is the size of the in-memory log the status screen reads.
 	maxEvents = 200
 
-	// maxDebugEvents is how many of those slots debug lines may hold. An
-	// AirPlay speaker on the network adds and removes a sink every 17 minutes
-	// or so, and with no limit those lines pushed the switches and warnings
-	// out of the log within a day.
+	// maxDebugEvents caps debug lines so sink churn cannot push out the rest.
 	maxDebugEvents = 50
 
-	// quietStart is how long after startup a failure to open the Barracuda
-	// node is expected. The udev rule grants access when the login session
-	// becomes active, which is a second or two after a boot-time start.
+	// Until the login session is active, the udev rule has not granted access
+	// to the Barracuda node, so open failures this early are expected.
 	quietStart = 30 * time.Second
 )
 
-// Holds keep the daemon from falling back while sinks are still arriving. At
-// boot WirePlumber publishes cards one at a time over a second or more, and
-// after a resume USB, HDMI and Bluetooth come back in any order. Falling back
-// in the middle picked whatever happened to be there first, which on a desk
-// with a monitor attached was the HDMI output, every boot. A hold ends once
-// the sink list has been quiet for holdStable, or at its cap, and then the
-// default is checked once. Sleep and shutdown hold with no cap at all, until
-// logind says the machine is back.
-//
-// They are variables so tests can shorten them.
+// Holds stop the daemon falling back while sinks are still arriving at boot
+// or after a resume. A hold ends once the sink list is quiet for its stable
+// time or reaches its cap. They are variables so tests can shorten them.
 var (
 	holdStable       = 1500 * time.Millisecond
 	holdStartupMax   = 10 * time.Second
 	holdResumeStable = 2 * time.Second
 	holdResumeMax    = 15 * time.Second
 
-	// resubscribeMin and resubscribeMax bound the wait before following
-	// pactl subscribe again after it ended.
 	resubscribeMin = time.Second
 	resubscribeMax = 30 * time.Second
 )
 
-// configPollInterval is how often the config file's mtime is checked. It is a
-// variable so tests do not have to wait two seconds for a reload.
 var configPollInterval = 2 * time.Second
 
 type Daemon struct {
 	backend audio.Backend
 
-	// configPath is where this daemon was told to read its config, so saves
-	// from the UI land in the same file rather than always in the default one.
 	configPath string
 	startTime  time.Time
 
@@ -96,45 +70,31 @@ type Daemon struct {
 	devices       []audio.Device
 	lastDefaultID string
 	events        []ipc.EventLog
-	// claim is the switch this daemon is about to make. The sink list read
-	// that shows it turns it into an announcement with the right reason.
-	claim *claim
-	// recentBT is when each Bluetooth device last connected, by MAC.
+	// claim is the switch in flight, so its announcement names the reason.
+	claim    *claim
 	recentBT map[string]time.Time
-	// goneBT is when each Bluetooth device last disconnected, by MAC.
-	goneBT map[string]time.Time
-	// listed is true once the sink list has been read, so the first reading
-	// is not logged as every sink being added.
-	listed bool
-	// holding is true during a startup, sleep or resume hold.
-	holding bool
-	audio   probe.Report
-	notes   notifier
+	goneBT   map[string]time.Time
+	listed   bool
+	holding  bool
+	audio    probe.Report
+	notes    notifier
 
-	// earcupsKnown is false until the Barracuda dongle pushes a power report.
-	// It does not repeat that report while the state holds, so a daemon that
-	// starts with the earcups already off has nothing to act on yet.
-	// earcupsOn is the last report. Byte 13 of report id 0x02.
+	// The dongle sends a power report only when the state changes, so the
+	// earcup state is unknown until the first report.
 	earcupsKnown bool
 	earcupsOn    bool
+	earcupsFile  string
 
-	// switcher decides where the output goes. See switcher.go.
 	switcher switcher
-	// prober finds out what the sound stack can do. Tests replace it.
-	prober func(context.Context) probe.Report
+	prober   func(context.Context) probe.Report
 
-	// switchMu serializes the multi-step switch sequences. Each one reads the
-	// sink list, decides, and sets a default; two interleaving would leave the
-	// output somewhere neither of them chose.
+	// switchMu serializes switch sequences. Each reads the sink list, decides,
+	// and sets a default, and two interleaved ones land where neither chose.
 	switchMu sync.Mutex
 
-	// saveMu serializes writes to the config file. Requests are handled on the
-	// connection's own goroutine now, so two clients pressing save at the same
-	// moment would otherwise race over the same temporary file.
+	// saveMu serializes config writes from concurrent IPC requests.
 	saveMu sync.Mutex
-	// ownSaveMod is the mtime left by this daemon's last save. The config
-	// watcher compares against it so a save from the UI does not come back as
-	// an external edit and reload the file the daemon just wrote.
+	// ownSaveMod lets the config watcher skip the daemon's own saves.
 	ownSaveMod time.Time
 
 	logMu   sync.Mutex
@@ -162,8 +122,7 @@ func New(cfg config.Config, backend audio.Backend, configPath string) *Daemon {
 	return d
 }
 
-// sources are the event streams the loop follows. A nil channel is one that
-// is not available on this machine, which select simply never picks.
+// sources holds the event streams. A nil channel is one this machine lacks.
 type sources struct {
 	bt    <-chan bluetooth.Event
 	audio <-chan audio.Event
@@ -171,9 +130,8 @@ type sources struct {
 	power <-chan power.State
 }
 
-// Run holds the event loop until ctx ends. IPC requests do not come through
-// here: the server calls Handle and Subscribe directly, because serving them
-// from this goroutine meant a held volume key queued behind a sink refresh.
+// Run runs the event loop until ctx ends. IPC requests do not pass through
+// it, so a held volume key never queues behind a sink refresh.
 func (d *Daemon) Run(ctx context.Context) error {
 	d.setLogFile(d.Config().General.LogFile)
 	defer d.closeLogFile()
@@ -187,6 +145,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.mu.Unlock()
 
 	d.infof("daemon %s started with %s backend, %s switching", version.String(), d.backend.Name(), d.switcher.name())
+	d.rememberEarcups(filepath.Join(config.RuntimeDir(), "poweraudio-earcups"))
 	go d.reprobe(ctx)
 
 	var src sources
@@ -217,9 +176,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// reprobe asks what the sound stack can do and records the answer. It runs at
-// startup and after the sound server comes back, which is when an upgrade
-// takes effect.
+// reprobe runs again after the sound server restarts, which applies upgrades.
 func (d *Daemon) reprobe(ctx context.Context) {
 	r := d.prober(ctx)
 	if ctx.Err() != nil {
@@ -235,10 +192,7 @@ func (d *Daemon) reprobe(ctx context.Context) {
 	d.changed()
 }
 
-// runEvents owns everything that touches the audio backend on a timer: the
-// Bluetooth handlers, the debounced sink refresh, the retry that waits for a
-// Bluetooth sink to appear, the holds, the reconnect to the sound server, and
-// the config file watch.
+// runEvents owns every timer that touches the audio backend.
 func (d *Daemon) runEvents(ctx context.Context, src sources) {
 	var (
 		settle <-chan time.Time // a burst of sink changes is still arriving
@@ -249,8 +203,6 @@ func (d *Daemon) runEvents(ctx context.Context, src sources) {
 		holdEnd   time.Time        // the hold's cap
 		holdQuiet time.Duration    // how long the list must stay quiet
 
-		// away is what logind last announced. Anything but Awake holds every
-		// switch until logind says the machine is back.
 		away       = power.Awake
 		resumeFrom string // the default when the machine started to go away
 
@@ -272,8 +224,6 @@ func (d *Daemon) runEvents(ctx context.Context, src sources) {
 		holdEnd = time.Now().Add(max)
 		hold = time.After(quiet)
 	}
-	// extendHold restarts the quiet period after a sink came or went, but
-	// never past the cap.
 	extendHold := func() {
 		if hold == nil {
 			return
@@ -298,8 +248,7 @@ func (d *Daemon) runEvents(ctx context.Context, src sources) {
 	}
 
 	startHold(holdStable, holdStartupMax)
-	// A stream handed in is followed as it is. Run hands in none, so the
-	// daemon follows the backend's own, and follows it again if it ends.
+	// Tests pass a stream in. Run passes none, so follow the backend's own.
 	if src.audio == nil {
 		subscribe()
 	} else {
@@ -326,10 +275,8 @@ func (d *Daemon) runEvents(ctx context.Context, src sources) {
 
 		case ev, ok := <-src.audio:
 			if !ok {
-				// pactl subscribe exits when the sound server restarts,
-				// which is the standard fix for Bluetooth trouble. Not
-				// following it again left a daemon that still answered
-				// but no longer noticed an unplug.
+				// pactl subscribe exits when the sound server restarts.
+				// Without a resubscribe the daemon would miss every unplug.
 				src.audio = nil
 				if ctx.Err() != nil {
 					continue
@@ -346,8 +293,7 @@ func (d *Daemon) runEvents(ctx context.Context, src sources) {
 				continue
 			}
 			if lostStream {
-				// The first event on a new stream is the proof that the
-				// server is back.
+				// The first event on a new stream proves the server is back.
 				lostStream = false
 				d.infof("audio event stream reconnected")
 				startHold(holdStable, holdStartupMax)
@@ -367,9 +313,9 @@ func (d *Daemon) runEvents(ctx context.Context, src sources) {
 			retry = armRetry()
 
 		case <-resub:
-			// The sink list is read again on the first event the new
-			// stream carries. Reading it here would log a failure on
-			// every attempt while the server is still down.
+			// Reread the sinks on the new stream's first event. Reading
+			// here would log a failure on every attempt while the
+			// server is down.
 			resub = nil
 			subscribe()
 
@@ -434,11 +380,8 @@ func (d *Daemon) runEvents(ctx context.Context, src sources) {
 	}
 }
 
-// endHold lets switching resume and checks the default once, now that the
-// sink list has stopped moving. before is the default from before a sleep or
-// a cancelled shutdown, and empty after a startup hold: nobody needs to be told
-// where audio is playing at login, but after a resume a different output is
-// worth a notification.
+// endHold resumes switching. before is the default from before a sleep or
+// cancelled shutdown. It is empty after a startup hold, which needs no notice.
 func (d *Daemon) endHold(ctx context.Context, before string) {
 	d.refreshDevices(ctx)
 	d.setHolding(false)
@@ -454,8 +397,7 @@ func (d *Daemon) endHold(ctx context.Context, before string) {
 func (d *Daemon) handleLinkEvent(ctx context.Context, ev razer.Event) {
 	switch {
 	case ev.Err != nil:
-		// Before login the node is root-only, and the watcher retries
-		// every two seconds until the session's access is granted.
+		// Before login the node is root-only and the watcher keeps retrying.
 		if time.Since(d.startTime) < quietStart {
 			d.debugf("Barracuda earcup watch: %v", ev.Err)
 		} else {
@@ -473,9 +415,7 @@ func (d *Daemon) handleLinkEvent(ctx context.Context, ev razer.Event) {
 	}
 }
 
-// checkConfigFile reloads the config when the file changed underneath the
-// daemon, so editing it by hand takes effect without a restart. It returns the
-// mtime to compare against next time.
+// checkConfigFile reloads a hand-edited config and returns the mtime it saw.
 func (d *Daemon) checkConfigFile(lastMod time.Time) time.Time {
 	mod := d.configModTime()
 	if mod.IsZero() || mod.Equal(lastMod) {
@@ -492,8 +432,7 @@ func (d *Daemon) checkConfigFile(lastMod time.Time) time.Time {
 	path := config.ResolvePath(d.configPath)
 	cfg, err := config.Load(d.configPath)
 	if err != nil {
-		// A half-written or broken file is not a reason to throw away the
-		// settings the daemon is already running with.
+		// A broken or half-written file keeps the running settings.
 		d.errorf("reloading config from %s: %v", path, err)
 		return mod
 	}
@@ -510,8 +449,6 @@ func (d *Daemon) configModTime() time.Time {
 	return info.ModTime()
 }
 
-// applyConfig swaps in a whole config and tells subscribers. The log file can
-// move with it, so the destination is reopened here rather than only at start.
 func (d *Daemon) applyConfig(cfg config.Config) {
 	d.mu.Lock()
 	d.cfg = cfg
@@ -525,9 +462,7 @@ func (d *Daemon) handleBluetoothEvent(ctx context.Context, ev bluetooth.Event) {
 	if ev.Connected {
 		state = "connected"
 	}
-	// A mouse or keyboard reconnecting after idle used to park a 15 second
-	// wait for an audio sink that would never come, and take the place of a
-	// headset that was waiting for its own.
+	// Non-audio devices never get a sink, so do not wait 15 seconds for one.
 	if ev.NotAudio {
 		d.debugf("bluetooth %s: %s (%s), not an audio device", state, ev.DeviceName, ev.MACAddress)
 		return
@@ -535,13 +470,11 @@ func (d *Daemon) handleBluetoothEvent(ctx context.Context, ev bluetooth.Event) {
 	d.infof("bluetooth %s: %s (%s)", state, ev.DeviceName, ev.MACAddress)
 
 	if ev.Connected {
-		// Read before anything reacts to the connect, so it names the
-		// device the person was listening on.
+		// Read before anything reacts, so it names what was playing.
 		before := d.defaultID()
 		d.noteConnect(ev.MACAddress)
 
-		// BlueZ reports the link before PipeWire publishes the sink, so give
-		// it a head start before going to look.
+		// BlueZ reports the link before PipeWire publishes the sink.
 		if !sleepCtx(ctx, time.Duration(d.switching().SwitchDelayMs)*time.Millisecond) {
 			return
 		}
@@ -555,9 +488,8 @@ func (d *Daemon) handleBluetoothEvent(ctx context.Context, ev bluetooth.Event) {
 	if !sleepCtx(ctx, disconnectSettle) {
 		return
 	}
-	// The wait gives the sink time to disappear. refreshSettled then moves
-	// the output only when the sink that was playing has gone or can no
-	// longer play, so an idle second headset disconnecting changes nothing.
+	// refreshSettled moves the output only if the playing sink left, so an
+	// idle second headset disconnecting changes nothing.
 	d.refreshSettled(ctx)
 }
 
@@ -571,9 +503,7 @@ func (d *Daemon) handleAudioEvent(ctx context.Context, ev audio.Event) {
 		d.refreshSettled(ctx)
 
 	case audio.EventDefaultChanged:
-		// Only the default moved, so one call to read it beats listing
-		// every sink. The full list is read when the new default is a sink
-		// the daemon has not seen yet.
+		// Only the default moved, so read just its name if the sink is known.
 		was := d.defaultID()
 		if !d.refreshDefault(ctx) {
 			d.refreshDevices(ctx)
@@ -584,12 +514,8 @@ func (d *Daemon) handleAudioEvent(ctx context.Context, ev audio.Event) {
 	}
 }
 
-// logSinkChanges names the sinks that appeared and went away between two
-// reads of the list. It runs on every read rather than on the pactl event,
-// because the event carries only the pulse index, and the read that notices a
-// sink is often an earlier one: the Bluetooth handler or a default change gets
-// there first. Diffing around the event then found nothing, and the journal
-// filled with lines like "sink removed: 942" that named no device.
+// logSinkChanges runs on every list read, not on the pactl event. The event
+// carries only the pulse index and often arrives after a read saw the change.
 func (d *Daemon) logSinkChanges(before, after []audio.Device) {
 	if added := missingFrom(after, before); len(added) > 0 {
 		d.debugf("sink added: %s", strings.Join(added, ", "))
@@ -615,23 +541,47 @@ func missingFrom(have, other []audio.Device) []string {
 	return names
 }
 
-// handleEarcups records a Barracuda power report and moves the output.
-// Off runs the same fallback as a sink disappearing. On follows on_connect,
-// the same rule as a Bluetooth headset connecting.
+// rememberEarcups loads the earcup state the last daemon saved at path, so a
+// headset that was off across a restart stays out of the fallback. A
+// remembered "on" never switches to it. The file does not survive a reboot.
+func (d *Daemon) rememberEarcups(path string) {
+	on, at, ok := razer.LoadState(path)
+	d.mu.Lock()
+	d.earcupsFile = path
+	if ok {
+		d.earcupsKnown = true
+		d.earcupsOn = on
+	}
+	d.mu.Unlock()
+	if ok {
+		state := "off"
+		if on {
+			state = "on"
+		}
+		d.infof("Barracuda earcups were %s at the last report, %s", state, at.Format("Jan 02 15:04"))
+	}
+}
+
+// handleEarcups records a power report. Off falls back, on follows on_connect.
 func (d *Daemon) handleEarcups(ctx context.Context, on bool) {
 	before := d.defaultID()
 	d.mu.Lock()
 	d.earcupsKnown = true
 	d.earcupsOn = on
+	file := d.earcupsFile
 	d.mu.Unlock()
+	if file != "" {
+		if err := razer.SaveState(file, on); err != nil {
+			d.debugf("saving the earcup state: %v", err)
+		}
+	}
 
 	d.refreshSettled(ctx)
 	d.switcher.earcups(ctx, on, before)
 }
 
-// setDefault switches the output and records why, so the change the next sink
-// list read reveals is announced with that reason. Callers already holding
-// switchMu use this; SetDefault takes the lock for them.
+// setDefault records why it switched, for the announcement. Callers must hold
+// switchMu. SetDefault takes it for them.
 func (d *Daemon) setDefault(ctx context.Context, deviceID string, reason switchReason, notify bool) error {
 	d.mu.Lock()
 	d.claim = &claim{id: deviceID, reason: reason, notify: notify}
@@ -642,8 +592,7 @@ func (d *Daemon) setDefault(ctx context.Context, deviceID string, reason switchR
 		d.refreshDevices(ctx)
 	}
 
-	// A claim the read did not use is stale: the set failed, or the device
-	// was already the default and nothing changed.
+	// An unused claim means the set failed or changed nothing.
 	d.mu.Lock()
 	if d.claim != nil && d.claim.id == deviceID {
 		d.claim = nil
@@ -652,29 +601,21 @@ func (d *Daemon) setDefault(ctx context.Context, deviceID string, reason switchR
 	return err
 }
 
-// SetDefault is the manual switch behind the UI and the CLI. It waits on the
-// same lock the automatic switches use, so a keypress and a Bluetooth connect
-// landing at the same moment cannot leave the output somewhere neither of
-// them picked. notify asks for a desktop notification, which a hotkey wants
-// and the terminal UI does not.
+// SetDefault is the manual switch. It takes the same lock as the automatic
+// switches. notify requests a desktop notification.
 func (d *Daemon) SetDefault(ctx context.Context, deviceID string, notify bool) error {
 	d.switchMu.Lock()
 	defer d.switchMu.Unlock()
 	return d.setDefault(ctx, deviceID, reasonManual, notify)
 }
 
-// refreshInitial loads the sink list and moves off a default that cannot
-// play, comparing against nothing earlier. It is what the end of a hold does.
 func (d *Daemon) refreshInitial(ctx context.Context) {
 	d.refreshDevices(ctx)
 	d.switcher.settled(ctx, "")
 }
 
-// refreshSettled re-reads the sink list and lets the switcher move the output
-// off whatever was default when that sink is gone or can no longer play.
-// During a hold it only reads. setDefault calls refreshDevices instead: it
-// already holds switchMu, and falling back from inside it would lock that
-// mutex twice.
+// refreshSettled rereads the sinks and lets the switcher fall back unless a
+// hold is on. setDefault must not call it, since it already holds switchMu.
 func (d *Daemon) refreshSettled(ctx context.Context) {
 	was := d.defaultID()
 	d.refreshDevices(ctx)
@@ -693,9 +634,7 @@ func (d *Daemon) refreshDevices(ctx context.Context) {
 	d.storeDevices(devices)
 }
 
-// refreshDefault reads only the default sink's name and updates the cached
-// list to match. It reports false when that name is not in the list, which
-// means a full read is needed.
+// refreshDefault reports false when the default is not in the cached list.
 func (d *Daemon) refreshDefault(ctx context.Context) bool {
 	name, err := d.backend.DefaultSinkName(ctx)
 	if err != nil {
@@ -712,14 +651,12 @@ func (d *Daemon) refreshDefault(ctx context.Context) bool {
 	return true
 }
 
-// storeDevices installs a fresh sink list. Subscribers are only woken when
-// something in it changed: pactl reports a change on every sink for reasons
-// that alter nothing the UI draws, and each wake built and sent a snapshot.
+// storeDevices wakes subscribers only on a real change. pactl reports many
+// changes that alter nothing the UI draws.
 func (d *Daemon) storeDevices(devices []audio.Device) {
 	d.mu.Lock()
-	// pactl still lists the Barracuda receiver when the earcups are off.
-	// The link report is the only signal, so a known-off headset is taken
-	// out of the fallback here.
+	// pactl still lists the Barracuda receiver with the earcups off, so the
+	// power report is the only way to mark it unavailable.
 	if d.earcupsKnown && !d.earcupsOn {
 		for i := range devices {
 			if razer.IsBarracuda(devices[i]) {
@@ -785,8 +722,7 @@ func (d *Daemon) StartTime() time.Time {
 	return d.startTime
 }
 
-// ConfigPath is where this daemon reads and writes its config. It is fixed at
-// startup, so no lock is needed.
+// ConfigPath needs no lock because it is fixed at startup.
 func (d *Daemon) ConfigPath() string {
 	return d.configPath
 }
@@ -797,8 +733,7 @@ func (d *Daemon) Config() config.Config {
 	return copyConfig(d.cfg)
 }
 
-// The event goroutines read config while IPC requests write it, so every read
-// outside a locked section goes through one of these.
+// Config reads outside a locked section go through these accessors.
 
 func (d *Daemon) switching() config.SwitchingConfig {
 	d.mu.RLock()
@@ -837,8 +772,7 @@ func (d *Daemon) deviceName(id string) string {
 	return id
 }
 
-// copyConfig detaches the priority list, so a caller holding a config cannot
-// see it change underneath as the UI edits the ranking.
+// copyConfig copies the priority slice so callers never see UI edits.
 func copyConfig(cfg config.Config) config.Config {
 	out := cfg
 	out.Priority = make([]config.PriorityEntry, len(cfg.Priority))
@@ -858,8 +792,7 @@ func deviceByID(devices []audio.Device, id string) *audio.Device {
 	return nil
 }
 
-// sleepCtx waits for d, reporting false when the context was cancelled first
-// so callers can stop rather than carry on through a shutdown.
+// sleepCtx reports false if ctx ended before d elapsed.
 func sleepCtx(ctx context.Context, d time.Duration) bool {
 	if d <= 0 {
 		return true

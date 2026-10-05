@@ -1,5 +1,4 @@
-# The Barracuda X receiver keeps its sound card when the earcups power off.
-# The on/off bit is a vendor HID report, and the daemon runs as the logged-in
-# user, so this node has to be readable without root. logind grants the
-# active session access to devices tagged uaccess.
+# The Barracuda X receiver keeps its sound card when the earcups power off,
+# so the daemon reads the on/off bit from a vendor HID report. uaccess lets
+# logind give the logged-in user access without root.
 KERNEL=="hidraw*", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="054e", MODE="0660", TAG+="uaccess"

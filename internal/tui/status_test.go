@@ -15,8 +15,6 @@ func testStatusModel(width, height int) statusModel {
 	return m
 }
 
-// The log spans days, so a bare clock made yesterday's failure look like this
-// morning's.
 func TestEventStampCarriesTheDate(t *testing.T) {
 	ev := ipc.EventLog{
 		Time:    time.Date(2026, 3, 4, 9, 15, 0, 0, time.UTC),
@@ -93,7 +91,6 @@ func TestStatusShowsTheConfigPath(t *testing.T) {
 	}
 }
 
-// Offering both keys told someone with no unit file that they could remove it.
 func TestServiceHintFollowsTheServiceState(t *testing.T) {
 	m := testStatusModel(90, 20)
 

@@ -1,7 +1,5 @@
-// Package ipc is the wire protocol between the daemon and its clients, and
-// the client that speaks it. Requests are newline-delimited JSON over a Unix
-// socket. Every method is one request and one response, except subscribe,
-// which keeps the connection open and streams a response per change.
+// Package ipc is the daemon's newline-delimited JSON protocol over a Unix
+// socket, and the client that speaks it.
 package ipc
 
 import (
@@ -14,12 +12,10 @@ import (
 )
 
 const (
-	// MethodSnapshot returns everything a client needs to draw a screen in
-	// one round trip: devices, daemon status, the event log and the config.
+	// MethodSnapshot returns devices, status, the event log and the config.
 	MethodSnapshot = "snapshot"
 
-	// MethodSubscribe sends a Snapshot immediately and then another one each
-	// time anything in it changes, until the client closes the connection.
+	// MethodSubscribe streams a Snapshot now and after every change.
 	MethodSubscribe = "subscribe"
 
 	MethodSetDefault       = "set_default"
@@ -41,8 +37,7 @@ type Response struct {
 	Error string          `json:"error,omitempty"`
 }
 
-// Level is how serious a logged event is. The daemon decides this when it
-// writes the line, so clients colour and filter without parsing sentences.
+// Level is how serious a logged event is.
 type Level string
 
 const (
@@ -59,24 +54,18 @@ type EventLog struct {
 }
 
 type StatusData struct {
-	// Version is the daemon's release, such as "0.4.1". It can differ from
-	// the client's after an upgrade that did not restart the service. A
-	// daemon that predates the field leaves it empty.
+	// Version is the daemon's release. Older daemons leave it empty.
 	Version    string    `json:"version,omitempty"`
 	Backend    string    `json:"backend"`
 	ConfigPath string    `json:"config_path"`
 	StartedAt  time.Time `json:"started_at"`
-	// Switching names the engine deciding where the output goes, such as
-	// "pactl". Machines differ in what they support, so this is what tells
-	// someone reading a bug report which path the daemon took.
+	// Switching names the switching engine, such as "pactl".
 	Switching string `json:"switching,omitempty"`
-	// Audio is what the daemon found out about the sound stack. It is the
-	// zero value until the first probe finishes, a moment after start.
+	// Audio is the zero value until the first probe finishes.
 	Audio probe.Report `json:"audio"`
 }
 
-// Snapshot is the daemon's whole visible state at one moment. Events are
-// oldest first and bounded by the daemon's retention.
+// Snapshot is the daemon's visible state. Events are oldest first.
 type Snapshot struct {
 	Devices []audio.Device `json:"devices"`
 	Status  StatusData     `json:"status"`
@@ -96,9 +85,7 @@ func (s *Snapshot) Default() *audio.Device {
 
 type SetDefaultParams struct {
 	DeviceID string `json:"device_id"`
-	// Notify asks for a desktop notification naming the new output. A
-	// hotkey bound to `poweraudio next` sets it, since there is no terminal
-	// to read the answer from. A daemon that predates the field ignores it.
+	// Notify asks for a desktop notification, for hotkeys with no terminal.
 	Notify bool `json:"notify,omitempty"`
 }
 

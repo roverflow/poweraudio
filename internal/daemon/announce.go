@@ -8,15 +8,12 @@ import (
 	"github.com/roverflow/poweraudio/internal/notify"
 )
 
-// switchReason is why the default output moved. Every change is announced
-// from one place, defaultMoved, which runs whenever a sink list read shows a
-// new default, whoever made the change. The reason decides the wording and
-// whether a notification is worth showing at all.
+// switchReason is why the default moved. defaultMoved announces every change
+// from one place, and the reason picks the wording and whether to notify.
 type switchReason int
 
 const (
-	// reasonExternal is a change poweraudio did not make: the desktop's
-	// sound settings, pavucontrol, or the session manager on its own.
+	// reasonExternal is a change poweraudio did not make.
 	reasonExternal switchReason = iota
 	reasonConnect
 	reasonEarcups
@@ -42,29 +39,22 @@ func (r switchReason) body() string {
 	}
 }
 
-// recentBTWindow is how long after a Bluetooth connect or disconnect a change
-// of default still counts as caused by it. The session manager switching to a
-// headset it remembers, or away from one that left, lands within a second or
-// two of the link changing.
+// recentBTWindow is how long after a Bluetooth link change a default change
+// counts as caused by it. WirePlumber switches within a second or two.
 const recentBTWindow = 10 * time.Second
 
-// claim is a switch this daemon is about to make, so the change it causes is
-// announced with the right reason rather than as someone else's doing.
 type claim struct {
 	id     string
 	reason switchReason
 	notify bool
 }
 
-// notifier is the slice of notify.Notifier the daemon uses, so tests can
-// record notices instead of sending them.
 type notifier interface {
 	Show(notify.Notice)
 }
 
-// takeClaim returns the reason recorded for a switch to id and clears it.
-// A claim for some other sink is left alone: the change it expects may still
-// be on its way.
+// takeClaim returns and clears the claim for id. A claim for another sink
+// stays, because its change may still be on the way.
 func (d *Daemon) takeClaim(id string) (claim, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -76,12 +66,10 @@ func (d *Daemon) takeClaim(id string) (claim, bool) {
 	return c, true
 }
 
-// noteConnect records a Bluetooth device connecting, so a switch onto it that
-// the session manager makes is announced as the connect it was.
+// noteConnect makes a session manager switch onto mac count as a connect.
 func (d *Daemon) noteConnect(mac string) { d.noteBT(d.recentBT, mac) }
 
-// noteDisconnect records a Bluetooth device going away, so a switch off it
-// that the session manager makes is announced as the fallback it was.
+// noteDisconnect makes a session manager switch off mac count as a fallback.
 func (d *Daemon) noteDisconnect(mac string) { d.noteBT(d.goneBT, mac) }
 
 func (d *Daemon) noteBT(seen map[string]time.Time, mac string) {
@@ -114,13 +102,8 @@ func (d *Daemon) seenRecently(seen map[string]time.Time, dev *audio.Device) bool
 	return ok && time.Since(at) <= recentBTWindow
 }
 
-// departure is the default a change moved away from.
 type departure struct {
-	// dev is that device as the read before the change saw it, and nil when
-	// that read did not list it.
-	dev *audio.Device
-	// gone is true when the read that shows the change no longer lists the
-	// device, or lists it as unable to play.
+	dev  *audio.Device
 	gone bool
 }
 
@@ -135,16 +118,12 @@ func departureOf(id string, before, after []audio.Device) departure {
 	return out
 }
 
-// wentAway reports whether the device the default moved off had left. The
-// sink may already be missing from the list, or still listed for a moment
-// after its Bluetooth link dropped.
+// wentAway also catches a sink still listed just after its link dropped.
 func (d *Daemon) wentAway(from departure) bool {
 	return from.dev != nil && (from.gone || d.disconnectedRecently(from.dev))
 }
 
-// defaultMoved runs once for every change of default that a sink list read
-// reveals. from is the default it moved off. It must not be called while
-// holding d.mu.
+// defaultMoved must not be called while holding d.mu.
 func (d *Daemon) defaultMoved(id string, from departure) {
 	dev := deviceByID(d.GetDevices(), id)
 
@@ -160,15 +139,13 @@ func (d *Daemon) defaultMoved(id string, from departure) {
 		case d.connectedRecently(dev):
 			c.reason = reasonConnect
 		case d.wentAway(from):
-			// WirePlumber picks a new default within a second of a headset
-			// disconnecting, before this daemon's own fallback runs. That is
-			// the headset leaving, not someone changing the output, and it
-			// used to be announced as "Changed outside poweraudio".
+			// WirePlumber picks a new default within a second of a
+			// headset leaving, before the daemon's fallback runs. That is
+			// a fallback, not an external change.
 			c.reason = reasonFallback
 			msg += " after " + from.dev.Name + " went away"
 		}
-		// During a hold the default moves several times as sinks come back,
-		// and only where it ends up is worth an info line.
+		// During a hold the default moves several times, so log it at debug.
 		if d.isHolding() {
 			d.debugf("%s", msg)
 		} else {
@@ -178,10 +155,8 @@ func (d *Daemon) defaultMoved(id string, from departure) {
 	d.announce(dev, c)
 }
 
-// announce decides whether a change deserves a desktop notification and
-// shows it. Nothing is shown during a startup or resume hold, for the
-// placeholder, or for a change the person made with poweraudio unless they
-// asked.
+// announce skips holds, the placeholder, and manual switches that did not
+// ask for a notification.
 func (d *Daemon) announce(dev *audio.Device, c claim) {
 	if dev == nil || dev.IsPlaceholder() || d.isHolding() {
 		return
@@ -214,8 +189,6 @@ func (d *Daemon) announce(dev *audio.Device, c claim) {
 	})
 }
 
-// iconFor picks a freedesktop icon name that matches the kind of output, where
-// every notification used to show headphones, HDMI included.
 func iconFor(dev audio.Device) string {
 	switch dev.Type {
 	case audio.DeviceTypeBluetooth, audio.DeviceTypeHeadphone:

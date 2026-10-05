@@ -12,19 +12,14 @@ import (
 	"github.com/roverflow/poweraudio/internal/ipc"
 )
 
-// stubBackend is enough of an audio.Backend to drive the daemon without a
-// sound server present.
 type stubBackend struct {
 	mu      sync.Mutex
 	devices []audio.Device
 	current string
-	// lists counts ListSinks calls and sets records every SetDefaultSink,
-	// so a test can tell a cheap refresh from a full one and see every
-	// switch the daemon made, including ones that landed where it already was.
+	// lists and sets let tests count full refreshes and every switch.
 	lists int
 	sets  []string
-	// refuse makes SetDefaultSink fail for these sinks, the way PipeWire
-	// answers "Not supported" for the placeholder.
+	// refuse fails SetDefaultSink the way PipeWire does for the placeholder.
 	refuse map[string]bool
 }
 
@@ -77,15 +72,12 @@ func (b *stubBackend) SubscribeEvents(context.Context) (<-chan audio.Event, erro
 	return nil, nil
 }
 
-// add appends a sink, which is how a Bluetooth device turning up looks to the
-// daemon.
 func (b *stubBackend) add(dev audio.Device) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.devices = append(b.devices, dev)
 }
 
-// setAvailable flips the port state of a sink that is still listed.
 func (b *stubBackend) setAvailable(id string, available bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -96,8 +88,6 @@ func (b *stubBackend) setAvailable(id string, available bool) {
 	}
 }
 
-// setCurrent is the default PipeWire picks on its own, before the daemon
-// has decided anything.
 func (b *stubBackend) setCurrent(id string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -110,7 +100,6 @@ func (b *stubBackend) defaultID() string {
 	return b.current
 }
 
-// remove drops a sink, which is how a Bluetooth device going away looks.
 func (b *stubBackend) remove(id string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -123,10 +112,7 @@ func (b *stubBackend) remove(id string) {
 	b.devices = kept
 }
 
-// TestConfigAccessRace drives the reads the event goroutines perform against
-// the writes an IPC request performs. Run under -race this fails if the config
-// is read without the lock, which is what the pending-switch goroutine used
-// to do.
+// Run with -race. It fails if a config read skips the lock.
 func TestConfigAccessRace(t *testing.T) {
 	backend := &stubBackend{devices: []audio.Device{
 		{ID: "1", Name: "Speakers", Available: true},
@@ -169,8 +155,6 @@ func TestConfigAccessRace(t *testing.T) {
 	wg.Wait()
 }
 
-// TestSwitchesSerialize checks that two switch sequences cannot interleave,
-// which is what leaves the output somewhere neither of them chose.
 func TestSwitchesSerialize(t *testing.T) {
 	backend := &stubBackend{devices: []audio.Device{
 		{ID: "1", Name: "Speakers", Available: true},
@@ -204,8 +188,6 @@ func TestSwitchesSerialize(t *testing.T) {
 	}
 }
 
-// TestEventLogIsBounded keeps the in-memory log from growing without limit on
-// a daemon that has been up for weeks.
 func TestEventLogIsBounded(t *testing.T) {
 	d := New(config.DefaultConfig(), &stubBackend{}, t.TempDir()+"/config.toml")
 	for i := 0; i < maxEvents*3; i++ {
@@ -215,15 +197,11 @@ func TestEventLogIsBounded(t *testing.T) {
 	if len(events) != maxEvents {
 		t.Errorf("kept %d events, want %d", len(events), maxEvents)
 	}
-	// Oldest first, so the newest entry is last; it is the one you look at
-	// first on the status screen.
 	if got := events[len(events)-1].Message; got != "event 599" {
 		t.Errorf("newest event = %q, want the last one logged", got)
 	}
 }
 
-// An AirPlay speaker adding and removing a sink every few minutes used to
-// push every switch and warning out of the log within a day.
 func TestDebugLinesCannotCrowdOutTheLog(t *testing.T) {
 	d := New(config.DefaultConfig(), &stubBackend{}, t.TempDir()+"/config.toml")
 	for i := 0; i < 20; i++ {

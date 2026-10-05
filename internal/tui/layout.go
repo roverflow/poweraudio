@@ -7,15 +7,12 @@ const (
 	defaultWidth  = 80
 	defaultHeight = 24
 
-	// Lines Model.View spends outside the screen content: the tab bar, a
-	// blank line, another blank line and the status bar.
+	// chromeLines is the tab bar, two blank lines and the status bar.
 	chromeLines = 4
 )
 
-// screenSize is the drawing area a screen gets, floored at one cell so the
-// arithmetic below never goes negative. Screens are given the real terminal
-// size rather than a minimum, because clamping to a minimum drew rows wider
-// and taller than the terminal and corrupted the frame on small windows.
+// screenSize floors the size at one cell. Screens get the real terminal
+// size, not a minimum, since rows wider than the terminal corrupt the frame.
 func screenSize(width, height int) (int, int) {
 	if width < 1 {
 		width = 1
@@ -26,14 +23,10 @@ func screenSize(width, height int) (int, int) {
 	return width, height
 }
 
-// runeLen counts characters rather than bytes so that padding and truncation
-// line up for device names that are not pure ASCII.
 func runeLen(s string) int {
 	return len([]rune(s))
 }
 
-// truncate shortens s to at most n characters and marks the cut with an
-// ellipsis. It slices runes, so a multi-byte name never breaks mid-character.
 func truncate(s string, n int) string {
 	if n <= 0 {
 		return ""
@@ -48,7 +41,6 @@ func truncate(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 
-// padRight pads s with spaces out to n characters.
 func padRight(s string, n int) string {
 	if d := n - runeLen(s); d > 0 {
 		return s + strings.Repeat(" ", d)
@@ -56,14 +48,11 @@ func padRight(s string, n int) string {
 	return s
 }
 
-// fit truncates then pads, so every cell in a column occupies exactly n
-// characters no matter what went into it.
 func fit(s string, n int) string {
 	return padRight(truncate(s, n), n)
 }
 
-// clampOffset moves a scroll offset the shortest distance that brings cursor
-// inside a window of visible rows over n items.
+// clampOffset scrolls the least distance that keeps cursor visible.
 func clampOffset(offset, cursor, n, visible int) int {
 	if visible <= 0 || n <= 0 {
 		return 0
@@ -83,8 +72,6 @@ func clampOffset(offset, cursor, n, visible int) int {
 	return offset
 }
 
-// clampScroll bounds a cursorless scroll offset, so the last row of a list
-// cannot be dragged up past the top of the window leaving mostly blank space.
 func clampScroll(offset, n, visible int) int {
 	limit := n - visible
 	if limit < 0 {
@@ -99,7 +86,6 @@ func clampScroll(offset, n, visible int) int {
 	return offset
 }
 
-// window returns the run of lines starting at offset that fits in visible rows.
 func window(lines []string, offset, visible int) []string {
 	if visible <= 0 || len(lines) == 0 {
 		return nil
@@ -117,9 +103,7 @@ func window(lines []string, offset, visible int) []string {
 	return lines[offset:end]
 }
 
-// frame stacks header, body and footer into exactly height lines. The body is
-// padded with blanks or clipped, so the footer always lands on the bottom row
-// and every screen returns the same number of lines the caller budgeted for.
+// frame pads or clips body so the output is exactly height lines.
 func frame(height int, header, body, footer []string) string {
 	if height < 1 {
 		height = 1
@@ -144,8 +128,6 @@ func frame(height int, header, body, footer []string) string {
 	return strings.Join(lines, "\n")
 }
 
-// scrollHint shows which way a list continues past the visible window, or an
-// empty string when the whole list already fits.
 func scrollHint(offset, visible, n int) string {
 	if visible <= 0 || n <= visible {
 		return ""
@@ -162,9 +144,7 @@ func scrollHint(offset, visible, n int) string {
 	return ""
 }
 
-// helpLine joins key hints with separators, dropping the hints at the end that
-// do not fit. A narrow terminal loses the least important keys instead of
-// wrapping the footer onto a second row.
+// helpLine drops trailing hints that do not fit instead of wrapping.
 func helpLine(width int, hints ...string) string {
 	const sep = "  ·  "
 	out := ""

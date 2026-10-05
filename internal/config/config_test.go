@@ -36,8 +36,6 @@ func TestLoadWritesDefaultWhenMissing(t *testing.T) {
 	}
 }
 
-// Save used to ignore the path it was given and always write to the default
-// location, so a daemon started with --config edited the wrong file.
 func TestSaveHonoursAnExplicitPath(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "custom.toml")
@@ -69,8 +67,6 @@ func TestSaveHonoursAnExplicitPath(t *testing.T) {
 	}
 }
 
-// The write goes to a temp file and is renamed, so a crash cannot leave a
-// half-written config behind. Nothing should be left over afterwards.
 func TestSaveLeavesNoTempFiles(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")

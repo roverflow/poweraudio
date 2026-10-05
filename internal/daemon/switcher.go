@@ -12,51 +12,32 @@ import (
 	"github.com/roverflow/poweraudio/internal/razer"
 )
 
-// switcher is where the daemon hands off the decision of where the output
-// goes. The daemon owns everything a person sees: the sink list, the log, the
-// notifications, the IPC socket. It tells the switcher what happened and the
-// switcher decides what to do about it.
+// switcher decides where the output goes. The daemon tells it what happened.
+// pactlSwitcher, which calls `pactl set-default-sink`, is the only engine.
 //
-// Today there is one engine, pactlSwitcher, which makes every decision itself
-// and calls `pactl set-default-sink`. It is what runs on PulseAudio, on
-// WirePlumber 0.4 and on any machine the probe does not recognise. On
-// WirePlumber 0.5 a second engine will hand the decisions to a WirePlumber
-// hook instead, and the daemon will not need to change to use it.
-//
-// The daemon calls these from its event goroutine, except where noted, and
-// never while holding d.mu.
+// The daemon calls these from its event goroutine and never while holding
+// d.mu, except name. Snapshot calls name under d.mu, so it must not lock.
 type switcher interface {
-	// name is what the status screen calls this engine.
 	name() string
 
-	// connected is a Bluetooth audio device arriving. before is the default
-	// output at the moment BlueZ reported it, ahead of anything the session
-	// manager did in response, so it is the device the person was listening
-	// on.
+	// before is the default when BlueZ reported the connect, ahead of any
+	// session manager switch.
 	connected(ctx context.Context, mac, name, before string)
 
-	// disconnected is a Bluetooth audio device going away.
 	disconnected(ctx context.Context, mac string)
 
-	// earcups is the Barracuda headset powering on or off. before is the
-	// default output when the report arrived.
+	// before is the default when the report arrived.
 	earcups(ctx context.Context, on bool, before string)
 
-	// settled runs after the sink list was read again. was is the default
-	// before the read, or empty when there is no earlier reading to compare
-	// with, such as the end of a startup or resume hold.
+	// settled runs after a sink list read. was is the default before it, or
+	// empty when there is nothing to compare, as at the end of a hold.
 	settled(ctx context.Context, was string)
 
-	// retry is the safety-net timer, fired while waiting reports true.
 	retry(ctx context.Context)
 
-	// waiting reports whether a connected device's sink has not turned up
-	// yet, so the event loop knows to keep the retry timer running.
 	waiting() bool
 }
 
-// pendingBT is a Bluetooth device that has connected but whose audio sink
-// the server has not published yet.
 type pendingBT struct {
 	mac    string
 	name   string
@@ -64,24 +45,15 @@ type pendingBT struct {
 	expiry time.Time
 }
 
-// pactlSwitcher decides everything itself and drives the server through the
-// audio backend. It reads the daemon's cached sink list, so callers refresh
-// before calling in.
+// pactlSwitcher reads the cached sink list, so callers refresh first.
 type pactlSwitcher struct {
 	d *Daemon
 
 	mu sync.Mutex
-	// pending holds every connected device still waiting for its sink,
-	// keyed by upper-case MAC. One slot used to mean a Bluetooth mouse
-	// reconnecting while a headset waited took the headset's place, and the
-	// headset never got the output.
-	pending map[string]*pendingBT
-	// previousID is where the output was before the daemon last moved it
-	// onto a device, for on_disconnect = "previous".
+	// pending is keyed by upper-case MAC so waits for several devices coexist.
+	pending    map[string]*pendingBT
 	previousID string
-	// stranded is true once a fallback has found nothing that can play. It
-	// is said once per outage: every sink leaving at logout used to log the
-	// same warning again, nine times in 70ms.
+	// stranded makes the daemon log "no output left" once per outage.
 	stranded bool
 }
 
@@ -111,15 +83,14 @@ func (s *pactlSwitcher) connected(ctx context.Context, mac, name, before string)
 }
 
 func (s *pactlSwitcher) disconnected(_ context.Context, mac string) {
-	// Only the device being waited on cancels its own wait. Another headset
-	// going away says nothing about this one.
+	// Only the device being waited on cancels its own wait.
 	s.mu.Lock()
 	delete(s.pending, strings.ToUpper(mac))
 	s.mu.Unlock()
 }
 
-// earcups only acts on power-on. Power-off needs nothing here: the daemon
-// marks the sink unable to play, and settled moves the output off it.
+// earcups acts only on power-on. On power-off, settled moves the output off
+// the sink the daemon marked unavailable.
 func (s *pactlSwitcher) earcups(ctx context.Context, on bool, before string) {
 	if !on || s.d.switching().OnConnect == "never" {
 		return
@@ -138,11 +109,9 @@ func (s *pactlSwitcher) settled(ctx context.Context, was string) {
 			return
 		}
 	}
-	// The default is somewhere that cannot play: the placeholder the server
-	// picks when nothing else is left, a port with nothing plugged in, a
-	// Barracuda whose earcups are off, or a sink that has gone while the
-	// server has not named a new default yet. The Barracuda case is what the
-	// session manager restores from its own history after a resume.
+	// The default cannot play. It may be the placeholder, an unplugged port,
+	// a Barracuda with its earcups off, or a sink that left before the server
+	// named a new default. WirePlumber restores the Barracuda after a resume.
 	cur := s.d.defaultID()
 	if cur == "" {
 		return
@@ -183,8 +152,8 @@ func (s *pactlSwitcher) waiting() bool {
 	return len(s.pending) > 0
 }
 
-// clearPending drops p only if it is still the attempt in flight for that
-// device, so a newer connection is not thrown away by an older one finishing.
+// clearPending drops p only if it is still current, so an older attempt
+// finishing cannot drop a newer connection.
 func (s *pactlSwitcher) clearPending(p *pendingBT) {
 	s.mu.Lock()
 	key := strings.ToUpper(p.mac)
@@ -194,9 +163,7 @@ func (s *pactlSwitcher) clearPending(p *pendingBT) {
 	s.mu.Unlock()
 }
 
-// trySwitchToBT finds the sink belonging to a connected Bluetooth device and
-// makes it the default, honouring on_connect. It reports whether the sink
-// existed, so callers know whether there is any point waiting longer.
+// trySwitchToBT reports false while the sink is missing, so callers wait.
 func (s *pactlSwitcher) trySwitchToBT(ctx context.Context, mac, name, before string) bool {
 	dev := findBTDevice(s.d.GetDevices(), mac, name)
 	if dev == nil {
@@ -205,10 +172,8 @@ func (s *pactlSwitcher) trySwitchToBT(ctx context.Context, mac, name, before str
 	return s.trySwitchTo(ctx, *dev, before, reasonConnect)
 }
 
-// trySwitchTo makes dev the default, honouring on_connect. A sink that cannot
-// play is refused, so a power-off report cannot be turned around into a
-// switch back onto it. A switch declined on priority grounds still reports
-// true: the sink is there, the answer is just no.
+// trySwitchTo refuses a sink that cannot play. It reports true whenever the
+// sink is usable, even when priority declines the switch.
 func (s *pactlSwitcher) trySwitchTo(ctx context.Context, dev audio.Device, before string, reason switchReason) bool {
 	d := s.d
 	d.switchMu.Lock()
@@ -219,10 +184,8 @@ func (s *pactlSwitcher) trySwitchTo(ctx context.Context, dev audio.Device, befor
 	}
 	current := d.defaultID()
 
-	// The session manager often gets there first: WirePlumber remembers the
-	// headset and restores it the moment its sink appears. Switching again
-	// would only repeat the announcement, and comparing the device's rank
-	// against itself logged "X is not ranked above X".
+	// WirePlumber often restores the headset as its sink appears. Switching
+	// again would repeat the announcement and log "X is not ranked above X".
 	if dev.ID == current {
 		s.rememberPrevious(before, dev.ID)
 		d.debugf("%s is already the default", dev.Name)
@@ -254,9 +217,7 @@ func (s *pactlSwitcher) trySwitchTo(ctx context.Context, dev audio.Device, befor
 	return true
 }
 
-// rememberPrevious records where the output was before it moved onto target.
-// The placeholder and target itself are never worth going back to, so they
-// leave the last good answer in place.
+// rememberPrevious skips the placeholder and target, keeping the last answer.
 func (s *pactlSwitcher) rememberPrevious(id, target string) {
 	if id == "" || id == target || id == audio.PlaceholderID {
 		return
@@ -266,9 +227,8 @@ func (s *pactlSwitcher) rememberPrevious(id, target string) {
 	s.mu.Unlock()
 }
 
-// fallback picks where the output goes once the device you were listening on
-// has gone away or can no longer play. It does nothing when the output is
-// already there, so a second report of the same departure is quiet.
+// fallback does nothing when the output is already there, so repeats stay
+// quiet.
 func (s *pactlSwitcher) fallback(ctx context.Context) {
 	d := s.d
 	d.switchMu.Lock()
@@ -285,9 +245,7 @@ func (s *pactlSwitcher) fallback(ctx context.Context) {
 			target = dev
 		}
 	}
-	// Either the ranking was asked for, or the device that was playing before
-	// is gone too. Leaving the output wherever the session happened to put it
-	// is the behaviour this daemon exists to avoid.
+	// Never leave the output wherever the session happened to put it.
 	if target == nil {
 		target = priority.Best(devices, d.priorities())
 	}
@@ -309,8 +267,7 @@ func (s *pactlSwitcher) fallback(ctx context.Context) {
 	d.infof("fallback to %s", target.Name)
 }
 
-// setStranded records whether the last fallback found nothing to play
-// through, and reports whether that is a change.
+// setStranded reports whether the stranded state changed.
 func (s *pactlSwitcher) setStranded(v bool) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -319,9 +276,6 @@ func (s *pactlSwitcher) setStranded(v bool) bool {
 	return changed
 }
 
-// skipReason says why a connect did not take the output. "Lower priority" was
-// misleading when neither device was on the list at all, which is the common
-// case for a ranking with one entry in it.
 func skipReason(next, current audio.Device, nextRank, currentRank, entries int) string {
 	if nextRank >= entries && currentRank >= entries {
 		return fmt.Sprintf("skipping switch: neither %s nor %s is on the priority list", next.Name, current.Name)
@@ -338,9 +292,8 @@ func findBarracuda(devices []audio.Device) *audio.Device {
 	return nil
 }
 
-// findBTDevice matches a BlueZ device against the sink list. MAC first, since
-// two headsets can share a model name, then the alias for backends that do not
-// report a MAC.
+// findBTDevice matches by MAC first, since two headsets can share a model
+// name, then by alias for backends that report no MAC.
 func findBTDevice(devices []audio.Device, mac, name string) *audio.Device {
 	if mac != "" {
 		for i := range devices {

@@ -1,7 +1,6 @@
 BINARY = poweraudio
-# The version comes from the nearest vX.Y.Z tag: "0.4.1" on the tag itself,
-# "0.4.1-3-gabc1234" three commits past it, "-dirty" with uncommitted changes.
-# Without tags it is left empty and the binary falls back to what Go recorded.
+# VERSION comes from the nearest vX.Y.Z tag. Without tags it is empty and
+# the binary uses what Go recorded.
 VERSION = $(shell git describe --tags --match 'v[0-9]*' --dirty 2>/dev/null | sed 's/^v//')
 LDFLAGS = -ldflags "-X github.com/roverflow/poweraudio/internal/version.stamped=$(VERSION)"
 PREFIX ?= $(HOME)/.local
@@ -36,6 +35,7 @@ uninstall:
 	rm -f $(HOME)/.config/systemd/user/poweraudio.service
 	systemctl --user daemon-reload 2>/dev/null || true
 	rm -f $${XDG_RUNTIME_DIR:-/run/user/$$(id -u)}/poweraudio.sock
+	rm -f $${XDG_RUNTIME_DIR:-/run/user/$$(id -u)}/poweraudio-earcups
 
 purge: uninstall
 	rm -rf $${XDG_CONFIG_HOME:-$(HOME)/.config}/poweraudio

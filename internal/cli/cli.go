@@ -1,12 +1,5 @@
-// Package cli is the non-interactive face of poweraudio. It turns one command
-// line into one request to the daemon and one block of plain text on stdout,
-// so the binary can be bound to a media key or polled by a status bar without
-// anyone starting the terminal UI. Nothing it prints is coloured and every
-// command that changes something prints what it changed, which is what makes
-// the output safe to pipe into another program.
-//
-// The daemon owns all the state. Every command here reads a snapshot, decides
-// what to do from that snapshot alone, and sends at most one request back.
+// Package cli runs one poweraudio command against the daemon and prints
+// plain text, so the binary can sit behind a media key or a status bar.
 package cli
 
 import (
@@ -20,23 +13,16 @@ import (
 	"github.com/roverflow/poweraudio/internal/ipc"
 )
 
-// Exit codes. Two is reserved for a bad command line so a shell script can
-// tell a typo from a device that is not there.
+// Exit codes. exitUsage lets a script tell a typo from a missing device.
 const (
 	exitOK    = 0
 	exitError = 1
 	exitUsage = 2
 )
 
-// daemonDown is the one message every command prints when nothing is
-// listening on the socket. It names both ways of starting a daemon because
-// the socket is equally likely to be missing on a machine that never
-// installed the unit and on one where the unit is simply stopped.
 const daemonDown = `poweraudio: daemon is not running (start it with "poweraudio daemon" or "systemctl --user start poweraudio")`
 
-// Client is the part of ipc.Client the commands use. Taking an interface here
-// is what lets the tests drive every command against a recorded fake instead
-// of a live daemon and a real audio server.
+// Client is the part of ipc.Client the commands use, so tests can fake it.
 type Client interface {
 	Snapshot() (*ipc.Snapshot, error)
 	Subscribe(ctx context.Context) (<-chan ipc.Snapshot, error)
@@ -46,14 +32,12 @@ type Client interface {
 	ReloadConfig() error
 }
 
-// Run executes one command and returns the process exit code. args is the
-// command line with the leading flags already removed, so args[0] is the
-// command name.
+// Run executes one command and returns the exit code. args[0] is the
+// command name, with leading flags already removed.
 func Run(args []string, client *ipc.Client, stdout, stderr io.Writer) int {
 	return run(args, client, stdout, stderr)
 }
 
-// run is Run over the interface, so tests reach it without a socket.
 func run(args []string, client Client, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		Usage(stderr)
@@ -106,8 +90,6 @@ func dispatch(cmd string, args []string, client Client, out io.Writer) error {
 	}
 }
 
-// usageError marks a bad command line. It is the only thing separating an
-// exit code of two from the one a failed request gets.
 type usageError struct{ msg string }
 
 func (e usageError) Error() string { return e.msg }
@@ -121,10 +103,8 @@ func isUsageError(err error) bool {
 	return errors.As(err, &ue)
 }
 
-// isUnreachable reports whether err means nothing answered on the socket, as
-// opposed to a daemon that answered with a failure. Dialling a missing or
-// dead unix socket fails with a net.OpError, so that is what separates the
-// two cases and decides whether the user is told to start a daemon.
+// isUnreachable reports whether nothing answered on the socket, as opposed
+// to a daemon that answered with an error.
 func isUnreachable(err error) bool {
 	var opErr *net.OpError
 	if errors.As(err, &opErr) {
@@ -166,8 +146,7 @@ or as a case-insensitive substring.
 bound to a key where there is no terminal to print to.
 `
 
-// Usage writes the command reference. main uses it for the top level flag
-// parser too, so a bad flag and a bad command print the same page.
+// Usage writes the command reference. main also prints it for bad flags.
 func Usage(w io.Writer) {
 	fmt.Fprint(w, usageText)
 }

@@ -7,21 +7,16 @@ import (
 	"github.com/roverflow/poweraudio/internal/ipc"
 )
 
-// coalesceWindow is how long a subscriber waits after the first change before
-// building a snapshot. A refresh that logs three lines is one change to the
-// person watching, and a volume drag is dozens.
+// coalesceWindow merges a burst of changes into one snapshot.
 const coalesceWindow = 50 * time.Millisecond
 
-// subscriber is one open subscription. The daemon only ever pokes wake, which
-// is buffered, so a client that has stopped reading cannot slow down a switch.
+// wake is buffered, so a client that stops reading cannot slow a switch.
 type subscriber struct {
 	wake chan struct{}
 }
 
-// Subscribe returns a channel that carries a snapshot immediately and another
-// one after every change to devices, events or config. Bursts are coalesced,
-// and only the newest snapshot is kept for a subscriber that is behind: a UI
-// wants the current state, not the backlog. The channel closes when ctx ends.
+// Subscribe sends a snapshot now and after every change, coalescing bursts
+// and keeping only the newest for a slow reader. It closes when ctx ends.
 func (d *Daemon) Subscribe(ctx context.Context) <-chan ipc.Snapshot {
 	sub := &subscriber{wake: make(chan struct{}, 1)}
 	out := make(chan ipc.Snapshot, 1)
@@ -50,9 +45,7 @@ func (d *Daemon) Subscribe(ctx context.Context) <-chan ipc.Snapshot {
 			if !sleepCtx(ctx, coalesceWindow) {
 				return
 			}
-			// Everything that happened during the window is already in the
-			// snapshot about to be built, so the pokes it left behind would
-			// only produce a duplicate.
+			// The snapshot below covers any poke left from the window.
 			select {
 			case <-sub.wake:
 			default:
@@ -78,9 +71,7 @@ func (d *Daemon) changed() {
 	}
 }
 
-// send never blocks. When the reader is behind, the snapshot waiting for it is
-// replaced rather than queued, so a stalled UI costs one stale snapshot rather
-// than unbounded memory.
+// send replaces a pending snapshot instead of blocking or queueing.
 func send(out chan ipc.Snapshot, snap ipc.Snapshot) {
 	select {
 	case out <- snap:

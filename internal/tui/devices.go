@@ -12,15 +12,14 @@ import (
 	"github.com/roverflow/poweraudio/internal/priority"
 )
 
-// deviceTypeW is the width of the device-type column. "Bluetooth" and
-// "Headphone" are the longest labels DeviceType.String returns.
+// deviceTypeW fits "Bluetooth" and "Headphone", the longest type labels.
 const deviceTypeW = 9
 
 const (
 	// deviceHeaderRows is the title, the current-output line and a blank.
 	deviceHeaderRows = 3
 
-	// devicePanelRows is the detail panel: a blank separator and five fields.
+	// devicePanelRows is the detail panel: a rule line and five fields.
 	devicePanelRows = 6
 )
 
@@ -104,9 +103,6 @@ func (m *devicesModel) moveCursor(delta int) {
 	}
 }
 
-// setSnapshot takes the device list from a pushed snapshot. A volume edit that
-// has not been confirmed yet keeps its local level, so a snapshot that crosses
-// a keypress in flight cannot drag the bar backwards.
 func (m *devicesModel) setSnapshot(devices []audio.Device, entries []config.PriorityEntry) {
 	m.devices = devices
 	m.entries = entries
@@ -118,8 +114,6 @@ func (m *devicesModel) setSnapshot(devices []audio.Device, entries []config.Prio
 	m.syncScroll()
 }
 
-// stepVolume applies the change locally first so the bar tracks the key, then
-// hands the coalescing decision to volumeState.
 func (m devicesModel) stepVolume(delta int) (devicesModel, tea.Cmd) {
 	if m.cursor >= len(m.devices) {
 		return m, nil
@@ -136,7 +130,6 @@ func (m devicesModel) stepVolume(delta int) (devicesModel, tea.Cmd) {
 	return m, nil
 }
 
-// volumeTick runs the debounce timer to its end.
 func (m devicesModel) volumeTick(seq int) (devicesModel, tea.Cmd) {
 	if m.vol.fire(seq) == volumeSend {
 		return m, requestVolumeCmd(m.vol.id, m.vol.percent)
@@ -144,8 +137,6 @@ func (m devicesModel) volumeTick(seq int) (devicesModel, tea.Cmd) {
 	return m, nil
 }
 
-// volumeDone closes one request out and starts the next one if the level moved
-// while it was out.
 func (m devicesModel) volumeDone() (devicesModel, tea.Cmd) {
 	if m.vol.done() == volumeArm {
 		return m, volumeTickCmd(m.vol.seq)
@@ -153,8 +144,6 @@ func (m devicesModel) volumeDone() (devicesModel, tea.Cmd) {
 	return m, nil
 }
 
-// volumeOf is the level to draw, which is the pending local edit when there is
-// one and the daemon's value otherwise.
 func (m devicesModel) volumeOf(dev audio.Device) int {
 	if pct, ok := m.vol.level(dev.ID, time.Now()); ok {
 		return pct
@@ -162,9 +151,6 @@ func (m devicesModel) volumeOf(dev audio.Device) int {
 	return int(math.Round(dev.Volume * 100))
 }
 
-// click moves the cursor to the row under the pointer. Clicking the row that
-// is already selected is the second half of a click-to-play gesture and sets
-// the device as the default output.
 func (m devicesModel) click(row int) (devicesModel, tea.Cmd) {
 	idx := m.rowIndex(row)
 	if idx < 0 {
@@ -178,8 +164,6 @@ func (m devicesModel) click(row int) (devicesModel, tea.Cmd) {
 	return m, nil
 }
 
-// rowIndex maps a row of the content area onto a device, or -1 when the
-// pointer is on the header, the detail panel or empty space.
 func (m devicesModel) rowIndex(row int) int {
 	row -= deviceHeaderRows
 	if row < 0 || row >= m.rowCount() {
@@ -192,8 +176,7 @@ func (m devicesModel) rowIndex(row int) int {
 	return idx
 }
 
-// scroll moves the cursor rather than the window alone, so the selection stays
-// on screen and the next keypress carries on from what the pointer picked.
+// scroll moves the cursor so the selection stays on screen.
 func (m devicesModel) scroll(delta int) (devicesModel, tea.Cmd) {
 	m.moveCursor(delta)
 	m.syncScroll()
@@ -204,8 +187,6 @@ func (m *devicesModel) syncScroll() {
 	m.offset = clampOffset(m.offset, m.cursor, len(m.devices), m.rowCount())
 }
 
-// rowCount is the number of device rows that fit once the header, the help
-// line and, when it is drawn, the detail panel have taken their rows.
 func (m devicesModel) rowCount() int {
 	_, h := screenSize(m.width, m.height)
 	n := h - deviceHeaderRows - m.footerRows()
@@ -222,8 +203,6 @@ func (m devicesModel) footerRows() int {
 	return 2
 }
 
-// showPanel keeps the list and drops the panel first on a short terminal,
-// because a device you cannot see is worse than one you cannot inspect.
 func (m devicesModel) showPanel() bool {
 	_, h := screenSize(m.width, m.height)
 	return devicePanelFits(h, len(m.devices))
@@ -237,9 +216,6 @@ func devicePanelFits(height, devices int) bool {
 	return spare >= devicePanelRows
 }
 
-// deviceColumns splits the width between the name, the type and the volume
-// bar. The type column goes first on a narrow terminal and the bar shrinks
-// after it; below roughly twenty columns everything clips.
 func deviceColumns(width int) (nameW, typeW, barW int) {
 	// The row spends nine columns on the marker, the gaps and the percentage.
 	avail := width - 3 - 9
@@ -325,8 +301,6 @@ func (m devicesModel) View() string {
 
 	footer := []string{}
 	if m.showPanel() {
-		// A rule rather than a blank, because the panel is anchored to the
-		// bottom of the screen and a short list leaves a gap above it.
 		footer = append(footer, "  "+styleMuted.Render(strings.Repeat("─", max(w-4, 1))))
 		footer = append(footer, detailRows(m.devices[m.cursor], m.volumeOf(m.devices[m.cursor]), m.entries, w)...)
 	}
@@ -370,9 +344,8 @@ func (m devicesModel) row(i int, dev audio.Device, width, nameW, typeW, barW int
 	return listRow(width, selected, pieces...)
 }
 
-// volumePieces draws the level as a filled run of heavy rule against a light
-// one. Anything above 100% turns amber, since PipeWire will happily amplify
-// past unity and clip.
+// volumePieces turns amber above 100%, where PipeWire amplifies and can
+// clip.
 func volumePieces(percent int, muted bool, width int) []rowPiece {
 	if width < 1 {
 		width = 1
@@ -399,8 +372,6 @@ func volumePieces(percent int, muted bool, width int) []rowPiece {
 	}
 }
 
-// detailRows describes the selected device below the list: the technical sink
-// name the daemon and pactl use, and the facts that are not in the row.
 func detailRows(dev audio.Device, percent int, entries []config.PriorityEntry, width int) []string {
 	valueW := width - 14
 	if valueW < 1 {
@@ -416,9 +387,7 @@ func detailRows(dev audio.Device, percent int, entries []config.PriorityEntry, w
 	if dev.IsDefault {
 		def = "yes"
 	}
-	// Shares the default field so the panel stays five rows. A new row would
-	// change devicePanelRows and the point where a short terminal drops the
-	// panel.
+	// Shares the default row so the panel stays devicePanelRows tall.
 	if !dev.Available {
 		def += "  ·  unavailable"
 	}
@@ -437,9 +406,6 @@ func detailRows(dev audio.Device, percent int, entries []config.PriorityEntry, w
 	}
 }
 
-// rankLabel places a device on the priority list using the same matcher the
-// daemon switches with, so the panel cannot claim a rank the daemon disagrees
-// with.
 func rankLabel(dev audio.Device, entries []config.PriorityEntry) string {
 	rank := priority.Rank(dev, entries)
 	if rank == len(entries) {
@@ -448,7 +414,6 @@ func rankLabel(dev audio.Device, entries []config.PriorityEntry) string {
 	return fmt.Sprintf("ranked %d of %d", rank+1, len(entries))
 }
 
-// field lays a label and a value out in two columns.
 func field(label, value string) string {
 	return "  " + styleMuted.Render(fit(label, 10)) + value
 }

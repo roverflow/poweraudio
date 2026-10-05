@@ -10,10 +10,8 @@ import (
 	"github.com/roverflow/poweraudio/internal/ipc"
 )
 
-// The in-memory ring keeps every level so the status screen can show what the
-// daemon was doing, with debug lines held to maxDebugEvents of its slots.
-// general.log_level only decides what reaches stderr, which systemd captures,
-// and the optional log file.
+// The in-memory ring keeps every level for the status screen.
+// general.log_level filters only stderr and the log file.
 
 func (d *Daemon) debugf(format string, args ...any) { d.logf(ipc.LevelDebug, format, args...) }
 func (d *Daemon) infof(format string, args ...any)  { d.logf(ipc.LevelInfo, format, args...) }
@@ -38,9 +36,8 @@ func (d *Daemon) logf(level ipc.Level, format string, args ...any) {
 	d.changed()
 }
 
-// appendEvent adds entry to the ring. A debug line past maxDebugEvents pushes
-// out the oldest debug line rather than the oldest line of any level, so a
-// noisy device cannot crowd the switches and warnings out of the log.
+// appendEvent drops the oldest debug line past maxDebugEvents, not the oldest
+// line overall.
 func appendEvent(events []ipc.EventLog, entry ipc.EventLog) []ipc.EventLog {
 	events = append(events, entry)
 	if entry.Level == ipc.LevelDebug {
@@ -63,9 +60,6 @@ func appendEvent(events []ipc.EventLog, entry ipc.EventLog) []ipc.EventLog {
 	return events
 }
 
-// write puts one line on stderr and, when general.log_file is set, the same
-// line in that file. The lock keeps two goroutines from interleaving halves of
-// a line in the file.
 func (d *Daemon) write(entry ipc.EventLog) {
 	d.logMu.Lock()
 	defer d.logMu.Unlock()
@@ -77,9 +71,7 @@ func (d *Daemon) write(entry ipc.EventLog) {
 	}
 }
 
-// setLogFile points the file half of the log at path, opening it for append so
-// a restart does not truncate yesterday's lines. An empty path turns it off.
-// A reload can move the destination, so this is not only a startup step.
+// setLogFile opens path for append. An empty path turns the file off.
 func (d *Daemon) setLogFile(path string) {
 	d.logMu.Lock()
 	unchanged := path == d.logPath
@@ -117,9 +109,7 @@ func (d *Daemon) closeLogFile() {
 	d.logPath = ""
 }
 
-// parseLevel reads general.log_level. Anything unrecognised, including the
-// empty string a config written before levels existed leaves behind, means
-// info.
+// parseLevel treats anything unrecognised, including empty, as info.
 func parseLevel(s string) ipc.Level {
 	switch ipc.Level(s) {
 	case ipc.LevelDebug, ipc.LevelInfo, ipc.LevelWarn, ipc.LevelError:

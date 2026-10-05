@@ -1,12 +1,9 @@
 #!/usr/bin/env bash
-# Makes a poweraudio release from the notes under "Unreleased" in CHANGELOG.md.
+# Releases the "Unreleased" notes in CHANGELOG.md as vX.Y.Z.
 #
 #   scripts/release.sh 0.5.0
 #
-# It moves those notes into a section for the new version, commits that, and
-# creates an annotated vX.Y.Z tag with the notes as its message. It does not
-# push. Check the commit and the tag, then push both:
-#
+# It commits and tags but does not push. Check both, then run:
 #   git push origin main v0.5.0
 set -euo pipefail
 
@@ -51,8 +48,7 @@ base=${previous:-}
 tmp=$(mktemp "$CHANGELOG.XXXXXX")
 trap 'rm -f "$tmp"' EXIT
 
-# Start a new, empty Unreleased section above the notes, and point the
-# comparison links at the new tag.
+# Open a new empty Unreleased section and point the compare links at the tag.
 awk -v version="$version" -v today="$today" -v url="$REPO_URL" -v base="$base" -v tag="$tag" '
     /^## \[Unreleased\]/ {
         print
@@ -71,7 +67,7 @@ awk -v version="$version" -v today="$today" -v url="$REPO_URL" -v base="$base" -
     }
     { print }
 ' "$CHANGELOG" >"$tmp"
-# Copied rather than moved, so the file keeps its mode instead of mktemp's 0600.
+# Copy instead of move, so the file keeps its mode, not mktemp's 0600.
 cat "$tmp" >"$CHANGELOG"
 rm -f "$tmp"
 trap - EXIT

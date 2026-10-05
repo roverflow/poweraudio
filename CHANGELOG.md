@@ -28,6 +28,14 @@ Add each change under "Unreleased" in the same pull request that makes it.
 - `install.sh` clones the full history without file contents, instead of only
   the last commit. The build must see the release tags to find its version.
 
+### Fixed
+
+- After a restart, the daemon no longer falls back to a Razer Barracuda X
+  with the earcups off. The receiver reports the earcups only when they turn
+  on or off, so a new daemon did not know that they were off. The daemon now
+  saves each report in `$XDG_RUNTIME_DIR/poweraudio-earcups` and reads it at
+  start. The file does not survive a reboot.
+
 ## [0.4.1] - 2026-10-05
 
 ### Fixed

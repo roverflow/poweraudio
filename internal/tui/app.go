@@ -26,16 +26,13 @@ const (
 )
 
 const (
-	// noticeTTL is how long an action result stays in the status bar.
 	noticeTTL = 5 * time.Second
 
-	// tabRows is the tab bar and the blank line under it, which is where the
-	// content area starts for the purposes of a mouse click.
+	// tabRows is the tab bar and the blank line under it.
 	tabRows = 2
 
-	// wheelRows is how far one notch scrolls a log. Lists with a cursor move
-	// a single row per notch instead, so the wheel does not throw the
-	// selection clean across the screen.
+	// wheelRows is the scroll per wheel notch for logs. Lists with a cursor
+	// move one row per notch so the selection does not jump.
 	wheelRows = 3
 )
 
@@ -45,8 +42,8 @@ type notice struct {
 	at   time.Time
 }
 
-// Model is the whole UI. It owns no audio state: every screen is a view over
-// the last snapshot the daemon pushed, and every action is a request back.
+// Model is the whole UI. It holds no audio state, only the last snapshot
+// the daemon pushed.
 type Model struct {
 	screen     screen
 	prevScreen screen
@@ -60,9 +57,8 @@ type Model struct {
 	width  int
 	height int
 
-	// gen is the subscription generation. Messages from an older one are
-	// dropped, which is what keeps a dead connection from being revived by a
-	// retry timer that a manual reconnect already overtook.
+	// gen is the subscription generation. Update drops messages from older
+	// generations so a stale retry timer cannot revive a dead connection.
 	gen       int
 	sub       <-chan ipc.Snapshot
 	connected bool
@@ -153,8 +149,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case uptimeTickMsg:
-		// The status screen is the only one that shows a clock, so the tick
-		// stops as soon as you leave it.
 		m.uptimeTicking = m.screen == screenStatus
 		if !m.uptimeTicking {
 			return m, nil
@@ -237,8 +231,6 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "q":
-		// Reordering a priority list and forgetting to press w used to throw
-		// the work away without a word. Ask once.
 		if m.config.hasUnsaved() && !m.confirmQuit {
 			m.confirmQuit = true
 			return m, m.notify(noticeWarn, "Unsaved config. q again to discard, w to save.")
@@ -287,8 +279,6 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// handleClick sends a click on the tab bar to the tabs and anything below it
-// to the active screen, in that screen's own row coordinates.
 func (m Model) handleClick(mouse tea.Mouse) (tea.Model, tea.Cmd) {
 	if mouse.Button != tea.MouseLeft {
 		return m, nil
@@ -342,8 +332,6 @@ func (m Model) handleWheel(mouse tea.Mouse) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// show switches screens and starts the uptime clock when the status screen
-// comes up.
 func (m Model) show(s screen) (tea.Model, tea.Cmd) {
 	m.screen = s
 	if s != screenStatus || m.uptimeTicking {
@@ -353,7 +341,6 @@ func (m Model) show(s screen) (tea.Model, tea.Cmd) {
 	return m, uptimeTickCmd()
 }
 
-// dropped handles the subscription going away, from either end.
 func (m Model) dropped(gen int) (tea.Model, tea.Cmd) {
 	if gen != m.gen {
 		return m, nil
@@ -386,8 +373,6 @@ func (m Model) View() tea.View {
 		content = m.help.View()
 	}
 
-	// Exactly h lines of content, so the whole frame comes to h+chromeLines
-	// and the status bar always lands on the bottom row.
 	body := strings.Join([]string{
 		m.renderTabs(w),
 		"",
@@ -402,8 +387,6 @@ func (m Model) View() tea.View {
 	return v
 }
 
-// contentSize is the space left for the active screen once the tab bar, the
-// blank lines and the status bar have taken their rows.
 func (m Model) contentSize() (int, int) {
 	return screenSize(m.width, m.height-chromeLines)
 }
@@ -435,8 +418,7 @@ var tabs = []struct {
 	{"s", "Status", screenStatus},
 }
 
-// tabLabels drops the words on a terminal too narrow for the full bar, since
-// a tab bar that overflows wraps and pushes the frame off by a line.
+// tabLabels falls back to bare keys when the full bar would wrap.
 func tabLabels(width int) []string {
 	full := make([]string, len(tabs))
 	total := 0
@@ -454,8 +436,7 @@ func tabLabels(width int) []string {
 	return short
 }
 
-// tabAt is the tab the pointer landed on, taking the two columns of padding
-// each side into account.
+// tabAt maps column x to a tab. The +4 is styleTab's padding.
 func tabAt(width, x int) (screen, bool) {
 	at := 0
 	for i, label := range tabLabels(width) {
@@ -481,9 +462,6 @@ func (m Model) renderTabs(width int) string {
 	return strings.Join(parts, "")
 }
 
-// renderStatusBar keeps the daemon state on the left and the most recent
-// action result on the right. The key hints live on each screen's help line
-// instead, so there is only one place to look for them.
 func (m Model) renderStatusBar(width int) string {
 	state, dot := "daemon offline", styleError.Render("●")
 	if m.connected {

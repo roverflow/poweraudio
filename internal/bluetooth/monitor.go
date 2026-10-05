@@ -13,10 +13,8 @@ type Event struct {
 	DeviceName string
 	Connected  bool
 	ObjectPath string
-	// NotAudio is true only when BlueZ says the device offers no audio
-	// output profile, such as a mouse or a keyboard. A device BlueZ could
-	// not describe counts as audio, so an unknown headset still switches,
-	// and so does an Event built without the field.
+	// NotAudio is true only when BlueZ says the device has no audio
+	// profile, so an unknown device still switches.
 	NotAudio bool
 }
 
@@ -47,15 +45,12 @@ func (m *Monitor) Subscribe(ctx context.Context) (<-chan Event, error) {
 		return nil, fmt.Errorf("adding D-Bus match: %w", err)
 	}
 
-	// godbus drops signals rather than blocking when the channel it was given
-	// is full, and this one carries every PropertiesChanged under /org/bluez,
-	// most of which are not ours. A connect lost that way is a switch that
-	// never happens, so there is room here for a burst.
+	// godbus drops signals when this channel is full, and a dropped connect
+	// is a missed switch.
 	signals := make(chan *dbus.Signal, 256)
 	m.conn.Signal(signals)
 
-	// The consumer sleeps through switch_delay_ms while it waits for the sink
-	// of a device that just connected, so events queue up behind it.
+	// The consumer sleeps through switch_delay_ms, so events queue here.
 	ch := make(chan Event, 64)
 	go func() {
 		defer close(ch)
@@ -119,10 +114,7 @@ func (m *Monitor) parseSignal(sig *dbus.Signal) (Event, bool) {
 	}, true
 }
 
-// deviceProps reads every Device1 property in one round trip. Asking for the
-// alias, the profiles and the icon one at a time cost three. A device that has
-// already gone away answers with an error, and an empty map then reads as an
-// unnamed device of unknown kind.
+// deviceProps returns an empty map when the device has already gone.
 func (m *Monitor) deviceProps(path string) map[string]dbus.Variant {
 	var props map[string]dbus.Variant
 	obj := m.conn.Object("org.bluez", dbus.ObjectPath(path))
@@ -132,9 +124,6 @@ func (m *Monitor) deviceProps(path string) map[string]dbus.Variant {
 	return props
 }
 
-// audioOutputUUIDs are the profiles a device advertises when it can play
-// sound for us: A2DP sink, the headset and hands-free roles, and LE Audio's
-// stream and capability services.
 var audioOutputUUIDs = map[string]bool{
 	"0000110b-0000-1000-8000-00805f9b34fb": true, // A2DP Audio Sink
 	"0000110d-0000-1000-8000-00805f9b34fb": true, // A2DP
@@ -145,9 +134,8 @@ var audioOutputUUIDs = map[string]bool{
 	"00001850-0000-1000-8000-00805f9b34fb": true, // LE Audio published capabilities
 }
 
-// isAudio decides whether a device could carry our output. The profile list is
-// the real answer. The icon covers a device whose profiles BlueZ has not
-// resolved yet, and a device with neither is given the benefit of the doubt.
+// isAudio checks profiles, then the icon for a device BlueZ has not resolved
+// yet. A device with neither counts as audio.
 func isAudio(uuids []string, icon string) bool {
 	for _, u := range uuids {
 		if audioOutputUUIDs[strings.ToLower(u)] {

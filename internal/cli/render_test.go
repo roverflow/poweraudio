@@ -85,7 +85,6 @@ uptime   2h 3m
 	}
 }
 
-// make install replaces the binary and leaves the old daemon running.
 func TestRenderStatusWarnsWhenTheDaemonIsAnotherVersion(t *testing.T) {
 	snap := fixture()
 	snap.Events = nil
@@ -96,7 +95,7 @@ func TestRenderStatusWarnsWhenTheDaemonIsAnotherVersion(t *testing.T) {
 		t.Errorf("renderStatus =\n%s\nwant a line\n%s", got, want)
 	}
 
-	// A daemon from before the field existed says nothing either way.
+	// A daemon too old to report its version gets no version line.
 	snap.Status.Version = ""
 	if got := renderStatus(&snap, "0.4.1", started); strings.Contains(got, "version") {
 		t.Errorf("renderStatus = %q, want no version line for a daemon that did not report one", got)

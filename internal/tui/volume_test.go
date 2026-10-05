@@ -14,8 +14,7 @@ func TestVolumeSendsOncePerQuietPeriod(t *testing.T) {
 	}
 	seq := v.seq
 
-	// Everything typed inside the quiet period rides on the timer that is
-	// already out.
+	// Edits inside the quiet period ride on the timer already out.
 	for _, pct := range []int{60, 65, 70} {
 		if got := v.edit("sink", pct, now); got != volumeNothing {
 			t.Fatalf("edit to %d%% returned %v, want volumeNothing", pct, got)
@@ -49,8 +48,7 @@ func TestVolumeKeepsOneRequestInFlight(t *testing.T) {
 		t.Fatalf("a timer during a request returned %v, want volumeNothing", got)
 	}
 
-	// The answer coming back re-arms rather than sending straight away, so a
-	// held key still costs one request per quiet period.
+	// The answer re-arms instead of sending straight away.
 	if got := v.done(); got != volumeArm {
 		t.Fatalf("done with a pending edit returned %v, want volumeArm", got)
 	}

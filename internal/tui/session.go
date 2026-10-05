@@ -10,17 +10,11 @@ import (
 	"github.com/roverflow/poweraudio/internal/ipc"
 )
 
-// subRetryDelay is how long the UI waits before dialling again after the
-// subscription drops. The daemon restarting under systemd is back inside a
-// second or two, and a tighter loop just burns a connect attempt per frame.
+// subRetryDelay paces redials. A systemd restart takes a second or two.
 const subRetryDelay = time.Second
 
 var errNoDaemon = errors.New("no daemon connection")
 
-// The gen field on every subscription message is the generation of the
-// subscription that produced it. A message from an abandoned connection, or a
-// retry timer that a manual reconnect has already overtaken, carries an older
-// generation and is dropped rather than resurrecting a dead channel.
 type (
 	subReadyMsg struct {
 		gen int
@@ -41,16 +35,14 @@ type (
 		snap ipc.Snapshot
 	}
 
-	// refreshMsg is the answer to a manual r, which goes out on its own
-	// connection and does not disturb the subscription.
+	// refreshMsg answers a manual r, on its own connection.
 	refreshMsg struct {
 		snap *ipc.Snapshot
 		err  error
 	}
 )
 
-// Requests raised by a screen. Screens hold no client, so they ask for an
-// action and the app makes the call.
+// Requests from screens, which hold no client. The app makes the call.
 type (
 	switchDeviceMsg struct{ deviceID string }
 
@@ -77,7 +69,6 @@ type (
 	uptimeTickMsg struct{}
 )
 
-// Results of a call to the daemon.
 type (
 	setDefaultMsg           struct{ err error }
 	volumeResultMsg         struct{ err error }
@@ -126,9 +117,8 @@ func noticeExpiryCmd(at time.Time) tea.Cmd {
 	})
 }
 
-// subscribeCmd opens the stream the whole UI reads from. The context lives as
-// long as the program does: the channel closes on its own when the daemon goes
-// away, which is the signal to show it offline and dial again.
+// subscribeCmd uses a context that never ends. The channel closes when the
+// daemon goes away, which triggers a redial.
 func subscribeCmd(client *ipc.Client, gen int) tea.Cmd {
 	return func() tea.Msg {
 		if client == nil {
@@ -142,8 +132,6 @@ func subscribeCmd(client *ipc.Client, gen int) tea.Cmd {
 	}
 }
 
-// waitSnapshotCmd takes the next snapshot off the stream. It is reissued after
-// every one, which is how a channel becomes a sequence of messages.
 func waitSnapshotCmd(ch <-chan ipc.Snapshot, gen int) tea.Cmd {
 	return func() tea.Msg {
 		snap, ok := <-ch

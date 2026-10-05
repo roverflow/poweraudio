@@ -1,10 +1,6 @@
-// Package razer reads the Barracuda X dongle's earcup report.
-//
-// The USB receiver stays a sound card while the earcups are powered off, and
-// PipeWire keeps the port at "availability unknown" either way. The dongle
-// pushes one vendor HID report when that changes and stays quiet in between,
-// so a daemon that starts after the headset is already off hears nothing
-// until the next press.
+// Package razer reads the Barracuda X dongle's earcup report. The dongle
+// sends one HID report per power change and nothing in between, so SaveState
+// keeps the last one for a restarted daemon.
 package razer
 
 import (
@@ -23,20 +19,16 @@ const (
 	VendorID  = 0x1532
 	ProductID = 0x054e
 
-	// hidID is the HID_ID line in the dongle's hidraw uevent.
 	hidID = "0003:00001532:0000054E"
 
 	reportID = 0x02
 
-	// connectedByte is 0x01 while the earcups are on and 0x00 when they are
-	// off. Captured from this dongle on 2026-09-22: the rest of the 64-byte
-	// report is a counter plus a payload that did not change across a power
-	// cycle. Index 13 is the only byte that followed the switch.
+	// connectedByte is 0x01 with the earcups on and 0x00 off. In a capture on
+	// 2026-09-22 it was the only byte of the report that followed the switch.
 	connectedByte = 13
 )
 
-// IsBarracuda reports whether dev is the Barracuda X receiver. The USB ids
-// come from pactl. The sink name is the fallback for a server that omits them.
+// IsBarracuda matches the receiver by USB id, or by sink name without ids.
 func IsBarracuda(dev audio.Device) bool {
 	if dev.VendorID == VendorID && dev.ProductID == ProductID {
 		return true
@@ -44,9 +36,8 @@ func IsBarracuda(dev audio.Device) bool {
 	return strings.Contains(dev.ID, "usb-1532_Razer_Barracuda_X")
 }
 
-// ParseReport reads one hidraw buffer. ok is false for a short read, a
-// different report, or a value other than the on and off bytes, so a report
-// this dongle has not been seen to send cannot move the output.
+// ParseReport reads one hidraw buffer. ok is false for anything but report
+// 0x02 with an on or off byte.
 func ParseReport(b []byte) (on bool, ok bool) {
 	if len(b) <= connectedByte || b[0] != reportID {
 		return false, false
@@ -61,9 +52,8 @@ func ParseReport(b []byte) (on bool, ok bool) {
 	}
 }
 
-// Event is one thing the watcher learned. Err is an open or read failure.
-// Opened means the hidraw node was opened and reports will follow. On is only
-// meaningful when Err is nil and Opened is false.
+// Event is one watcher result. On only means something when Err is nil and
+// Opened is false.
 type Event struct {
 	On     bool
 	Opened bool
@@ -71,9 +61,8 @@ type Event struct {
 	Err    error
 }
 
-// Watch reads the dongle until ctx ends. The node name can change across a
-// replug, so a failed read starts the search again. A missing dongle is
-// quiet. The first open error is reported once, until a later open works.
+// Watch reads the dongle until ctx ends. A replug can rename the node, so a
+// failed read starts the search again. A repeated error is sent only once.
 func Watch(ctx context.Context) <-chan Event {
 	ch := make(chan Event, 4)
 	go func() {
@@ -187,5 +176,34 @@ func sleep(ctx context.Context, d time.Duration) bool {
 		return true
 	case <-ctx.Done():
 		return false
+	}
+}
+
+// SaveState records the last earcup report, which the dongle never repeats.
+func SaveState(path string, on bool) error {
+	state := "off\n"
+	if on {
+		state = "on\n"
+	}
+	return os.WriteFile(path, []byte(state), 0o600)
+}
+
+// LoadState reads what SaveState wrote and when. ok is false if unknown.
+func LoadState(path string) (on bool, at time.Time, ok bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, time.Time{}, false
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, time.Time{}, false
+	}
+	switch strings.TrimSpace(string(data)) {
+	case "on":
+		return true, info.ModTime(), true
+	case "off":
+		return false, info.ModTime(), true
+	default:
+		return false, time.Time{}, false
 	}
 }

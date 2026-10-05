@@ -28,8 +28,6 @@ func (r *recorder) notices() []Notice {
 	return append([]Notice(nil), r.got...)
 }
 
-// A fallback, the session manager's own pick and a second fallback within a
-// few milliseconds are one change to the person at the desk.
 func TestBurstCollapsesToTheLastNotice(t *testing.T) {
 	r := &recorder{done: make(chan struct{}, 1)}
 	n := newNotifier(20*time.Millisecond, r.deliver)

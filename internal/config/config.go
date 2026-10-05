@@ -48,7 +48,7 @@ type PriorityEntry struct {
 }
 
 func DefaultConfig() Config {
-	socketPath := filepath.Join(xdgRuntimeDir(), "poweraudio.sock")
+	socketPath := filepath.Join(RuntimeDir(), "poweraudio.sock")
 	return Config{
 		General: GeneralConfig{
 			Backend:  "auto",
@@ -76,8 +76,7 @@ func DefaultPath() string {
 	return filepath.Join(xdgConfigHome(), "poweraudio", "config.toml")
 }
 
-// ResolvePath fills in the default location for an empty path, so callers can
-// record where the config actually came from and write back to the same file.
+// ResolvePath returns the default config path for an empty one.
 func ResolvePath(path string) string {
 	if path == "" {
 		return DefaultPath()
@@ -106,7 +105,7 @@ func Load(path string) (Config, error) {
 	}
 
 	if cfg.Daemon.SocketPath == "" {
-		cfg.Daemon.SocketPath = filepath.Join(xdgRuntimeDir(), "poweraudio.sock")
+		cfg.Daemon.SocketPath = filepath.Join(RuntimeDir(), "poweraudio.sock")
 	}
 
 	return cfg, nil
@@ -120,9 +119,8 @@ func writeDefault(path string, cfg Config) error {
 	return write(path, cfg, "# poweraudio configuration\n\n")
 }
 
-// write encodes cfg beside the target and renames it into place. Truncating
-// the real file first meant a crash mid-write left a half-written config that
-// the next start refused to parse.
+// write renames a temp file into place so a crash cannot leave a
+// half-written config.
 func write(path string, cfg Config, header string) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -169,7 +167,8 @@ func xdgConfigHome() string {
 	return filepath.Join(home, ".config")
 }
 
-func xdgRuntimeDir() string {
+// RuntimeDir is $XDG_RUNTIME_DIR, which systemd empties at logout.
+func RuntimeDir() string {
 	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
 		return dir
 	}

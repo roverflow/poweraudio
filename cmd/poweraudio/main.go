@@ -32,8 +32,7 @@ func main() {
 		return
 	}
 
-	// Resolve once, so the daemon writes changes back to the file it read
-	// rather than to the default location.
+	// Resolve once so the daemon writes back to the file it read.
 	path := config.ResolvePath(*configPath)
 
 	cfg, err := config.Load(path)
@@ -41,8 +40,6 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 
-	// flag.Parse stops at the first argument that is not a flag, so anything
-	// left is a command and its own arguments.
 	args := flag.Args()
 	command := ""
 	if len(args) > 0 {
@@ -51,7 +48,7 @@ func main() {
 
 	switch {
 	case *daemonMode || command == "daemon":
-		// The flag is kept because the installed unit files pass it.
+		// The flag stays because the installed unit files pass it.
 		if err := runDaemon(cfg, path); err != nil {
 			log.Print(err)
 			os.Exit(1)
@@ -90,18 +87,14 @@ func runDaemon(cfg config.Config, configPath string) error {
 	srv := daemon.NewServer(cfg.Daemon.SocketPath, d)
 	if err := srv.Start(ctx); err != nil {
 		if errors.Is(err, daemon.ErrAlreadyRunning) {
-			// Losing the socket to another daemon is a normal outcome, not a
-			// failure, so this returns nil and exits zero. The unit file sets
-			// Restart=on-failure with RestartSec=5, so exiting non-zero here
-			// restarted the unit every five seconds for as long as a session
-			// daemon held the socket.
+			// Exit zero, or Restart=on-failure restarts the unit every five
+			// seconds while another daemon holds the socket.
 			log.Print(err)
 			return nil
 		}
 		return fmt.Errorf("ipc server: %w", err)
 	}
-	// Returning rather than calling log.Fatal keeps this reachable, so the
-	// socket file does not outlive the daemon.
+	// Errors return instead of calling log.Fatal so this removes the socket.
 	defer srv.Close()
 	log.Printf("listening on %s", cfg.Daemon.SocketPath)
 

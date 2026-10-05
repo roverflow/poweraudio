@@ -13,9 +13,7 @@ import (
 	"github.com/roverflow/poweraudio/internal/ipc"
 )
 
-// serviceCheckTTL is how stale the systemd answer is allowed to get. Asking
-// systemctl is a subprocess, and View runs on every keystroke, so the state is
-// cached and aged out rather than looked up while drawing.
+// serviceCheckTTL caches systemctl answers, since View runs per keystroke.
 const serviceCheckTTL = 10 * time.Second
 
 const (
@@ -23,12 +21,10 @@ const (
 	// heading and a blank.
 	statusFullHeader = 9
 
-	// statusTightHeader is the title and a blank, which is what is left when
-	// the terminal is too short for the fields.
+	// statusTightHeader is the title and a blank.
 	statusTightHeader = 2
 
-	// statusStampFormat carries the date because the log spans days, and a
-	// bare clock made yesterday's failure look like this morning's.
+	// statusStampFormat carries the date because the log spans days.
 	statusStampFormat = "Jan 02 15:04:05"
 )
 
@@ -53,8 +49,6 @@ func newStatusModel() statusModel {
 	return m
 }
 
-// checkService refreshes the cached systemd state. Installing or removing the
-// unit forces it; otherwise it only runs once the previous answer has aged out.
 func (m *statusModel) checkService(force bool) {
 	if !force && time.Since(m.svcCheckedAt) < serviceCheckTTL {
 		return
@@ -147,7 +141,6 @@ func (m statusModel) View() string {
 	if len(m.events) == 0 {
 		body = []string{"  " + styleMuted.Render("nothing logged yet")}
 	} else {
-		// Newest first, which is what you want when a switch just misfired.
 		rows := make([]string, 0, len(m.events))
 		for i := len(m.events) - 1; i >= 0; i-- {
 			rows = append(rows, eventRow(m.events[i], w))
@@ -163,8 +156,6 @@ func (m statusModel) View() string {
 	return frame(h, header, body, footer)
 }
 
-// helpHints offers the service key that applies. Offering both used to tell
-// someone with no unit file that they could remove it.
 func (m statusModel) helpHints() []string {
 	hints := []string{"j/k scroll", "r refresh"}
 	if m.svcInstalled {
@@ -175,15 +166,11 @@ func (m statusModel) helpHints() []string {
 	return append(hints, "? help", "q quit")
 }
 
-// statusShowsFields drops the fields on a short terminal. The fixed header
-// used to eat the whole budget at fourteen rows, and frame then clipped the
-// log and the help line off the bottom.
 func statusShowsFields(height int) bool {
 	return height-statusFullHeader-2 >= 2
 }
 
-// eventRows mirrors the header and footer that View builds, so the scroll
-// bounds match what actually fits.
+// eventRows must mirror the header and footer that View builds.
 func (m statusModel) eventRows() int {
 	_, h := screenSize(m.width, m.height)
 	used := statusTightHeader + 1
@@ -196,9 +183,7 @@ func (m statusModel) eventRows() int {
 	return 1
 }
 
-// audioLine names the sound stack the daemon found and the engine it chose,
-// "PipeWire 1.6.9, WirePlumber 0.5.17 · pactl". Until the first probe lands,
-// or from a daemon that predates it, it falls back to the backend name.
+// audioLine falls back to the backend name until the first probe lands.
 func (m statusModel) audioLine() string {
 	if m.status.Audio.ProbedAt.IsZero() {
 		return m.status.Backend
@@ -227,9 +212,6 @@ func (m statusModel) serviceState() string {
 	return styleWarn.Render("installed, disabled")
 }
 
-// eventRow stamps a log line with its date and colours it by the level the
-// daemon recorded. Matching keywords in the sentence used to call a successful
-// "switch failed over" line an error.
 func eventRow(ev ipc.EventLog, width int) string {
 	stamp := styleMuted.Render(ev.Time.Format(statusStampFormat))
 	text := truncate(ev.Message, width-21)
@@ -302,9 +284,7 @@ func installServiceCmd() tea.Cmd {
 	}
 }
 
-// removeServiceCmd stops the running unit as well as disabling it. Leaving out
-// --now disabled the unit for the next login and left the daemon running, so
-// the UI reported the service gone while it was still switching sinks.
+// removeServiceCmd uses --now so the running daemon stops too.
 func removeServiceCmd() tea.Cmd {
 	return func() tea.Msg {
 		exec.Command("systemctl", "--user", "disable", "--now", "poweraudio").Run()

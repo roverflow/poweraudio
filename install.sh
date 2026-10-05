@@ -40,23 +40,17 @@ get_current_version() {
 
 VERSION_VAR=github.com/roverflow/poweraudio/internal/version.stamped
 
-# describe_version names the build after the nearest vX.Y.Z tag, the same way
-# the Makefile does, and prints nothing when there is no tag to go by.
 describe_version() {
     git describe --tags --match 'v[0-9]*' --dirty 2>/dev/null | sed 's/^v//'
 }
 
-# Runs inside a command substitution, so it must not register the cleanup trap
-# itself. That subshell exits the moment this function returns, and an EXIT
-# trap set here fired then, deleting the build before the caller could install
-# anything out of it. main owns WORKDIR and the trap.
+# Runs in a command substitution, so it must not set the EXIT trap. The
+# subshell exits on return and would delete the build. main owns the trap.
 build_in_tmpdir() {
     local src="${WORKDIR}/poweraudio"
 
     info "Cloning repository..."
-    # A blobless clone keeps every commit and tag, which the version needs,
-    # and fetches file contents only for the commit that gets built. A
-    # --depth 1 clone had no tags, so the binary reported a bare commit hash.
+    # Blobless, not --depth 1, so the tags the version needs come along.
     git clone --filter=blob:none "$REPO" "$src" >&2 2>&1
     ok "Cloned"
 

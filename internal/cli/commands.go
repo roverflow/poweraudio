@@ -32,8 +32,7 @@ func cmdList(args []string, client Client, out io.Writer) error {
 	if opts.json {
 		devices := snap.Devices
 		if devices == nil {
-			// An empty list is easier to consume than null for anything
-			// looping over the output.
+			// Print [] instead of null for an empty list.
 			devices = []audio.Device{}
 		}
 		return writeJSON(out, devices)
@@ -169,9 +168,7 @@ func cmdMute(args []string, client Client, out io.Writer) error {
 		return err
 	}
 
-	// The daemon owns the state, so the new state is read back rather than
-	// assumed. Printing the opposite of what we saw would lie whenever the
-	// backend refused the change.
+	// Read the state back, since the backend may have refused the toggle.
 	muted := !dev.Muted
 	if after, err := client.Snapshot(); err == nil {
 		if updated := deviceByID(after.Devices, dev.ID); updated != nil {
@@ -206,11 +203,8 @@ func cmdWatch(args []string, client Client, out io.Writer) error {
 	return watch(ctx, stream, out, opts.json)
 }
 
-// watch prints one line per change until the stream ends. Repeated lines are
-// dropped in text mode because the daemon sends a snapshot for every event it
-// logs, and a status bar only wants to hear about the ones that change what
-// it draws. The json mode keeps every snapshot, since a program reading it
-// may care about the parts the line leaves out.
+// watch prints one line per change. Text mode drops repeated lines, since
+// the daemon sends a snapshot for every logged event. JSON keeps them all.
 func watch(ctx context.Context, stream <-chan ipc.Snapshot, out io.Writer, asJSON bool) error {
 	last := ""
 	for snap := range stream {
@@ -231,8 +225,7 @@ func watch(ctx context.Context, stream <-chan ipc.Snapshot, out io.Writer, asJSO
 		}
 	}
 
-	// A closed channel is either the signal handler doing its job or the
-	// daemon going away under us, and only the second one is a failure.
+	// A closed channel after a signal is a clean exit, not a lost daemon.
 	if ctx.Err() != nil {
 		return nil
 	}

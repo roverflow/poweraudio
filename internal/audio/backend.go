@@ -19,9 +19,7 @@ type Event struct {
 type Backend interface {
 	Name() string
 	ListSinks(ctx context.Context) ([]Device, error)
-	// DefaultSinkName is the name of the current default sink, the same
-	// string a Device carries as its ID. It costs one small call where
-	// ListSinks costs two, which matters on every default-change event.
+	// DefaultSinkName costs one pactl call where ListSinks costs two.
 	DefaultSinkName(ctx context.Context) (string, error)
 	SetDefaultSink(ctx context.Context, deviceID string) error
 	SetVolume(ctx context.Context, deviceID string, percent int) error

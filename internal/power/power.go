@@ -1,12 +1,5 @@
-// Package power reports what logind says the machine is about to do: sleep,
-// shut down, or carry on after either.
-//
-// Both take the sound cards away while the daemon is still running. Suspend
-// removes USB, HDMI and Bluetooth sinks and brings them back one at a time
-// after the resume. Shutdown closes the login session first, which revokes
-// the session's access to the cards, and every sink vanishes about a second
-// before systemd stops the daemon. Without knowing either is happening, the
-// daemon treated each departure as a reason to fall back.
+// Package power reports logind's sleep and shutdown signals. Both remove
+// sinks while the daemon runs, and that must not trigger a fallback.
 package power
 
 import (
@@ -20,12 +13,9 @@ import (
 type State int
 
 const (
-	// Awake means the machine resumed from sleep, or a shutdown that was
-	// announced has been cancelled.
+	// Awake means resumed, or logind cancelled an announced shutdown.
 	Awake State = iota
-	// Sleeping means the machine is about to suspend or hibernate.
 	Sleeping
-	// ShuttingDown means the machine is about to power off or reboot.
 	ShuttingDown
 )
 
@@ -93,8 +83,7 @@ func Watch(ctx context.Context) (<-chan State, error) {
 	return out, nil
 }
 
-// parse reads one logind signal. Both carry a single boolean: true as the
-// machine is about to go, false once it is back or the shutdown was called off.
+// Both logind signals carry true before going and false after coming back.
 func parse(sig *dbus.Signal) (State, bool) {
 	if len(sig.Body) < 1 {
 		return Awake, false

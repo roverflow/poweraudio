@@ -8,6 +8,7 @@ SERVICE_FILE="${SERVICE_DIR}/${SERVICE_NAME}.service"
 CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/poweraudio"
 RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 SOCKET_FILE="${RUNTIME_DIR}/${SERVICE_NAME}.sock"
+EARCUPS_FILE="${RUNTIME_DIR}/${SERVICE_NAME}-earcups"
 BINARY="${INSTALL_DIR}/${SERVICE_NAME}"
 
 RED='\033[0;31m'
@@ -26,9 +27,8 @@ skip()  { printf "  %s\n" "$*" >&2; }
 PURGE=false
 YES=false
 
-# Matches the daemon by its own command line: the poweraudio binary followed by
-# --daemon or daemon, flags allowed in between. A bare "poweraudio --daemon"
-# pattern also matched any shell or editor whose arguments mentioned it.
+# Matches only the daemon's own command line, not shells or editors whose
+# arguments mention poweraudio --daemon.
 DAEMON_PATTERN='^[^ ]*poweraudio( [^ ]+)* (--daemon|daemon)( |$)'
 
 usage() {
@@ -181,6 +181,11 @@ remove_files() {
     elif [[ -e "$SOCKET_FILE" ]]; then
         rm -f "$SOCKET_FILE"
         ok "Removed stale ${SOCKET_FILE}"
+    fi
+
+    if [[ -e "$EARCUPS_FILE" ]]; then
+        rm -f "$EARCUPS_FILE"
+        ok "Removed ${EARCUPS_FILE}"
     fi
 }
 

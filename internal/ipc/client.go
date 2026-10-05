@@ -12,15 +12,10 @@ import (
 )
 
 const (
-	// dialTimeout covers a socket file that exists but has nothing behind it.
 	dialTimeout = 2 * time.Second
 
-	// callTimeout bounds a single request. Without it a wedged daemon hung
-	// the UI's refresh forever instead of showing that it is offline.
 	callTimeout = 5 * time.Second
 
-	// maxLine is the largest response a client will read. A snapshot with
-	// 200 events and a long device list is well under 100 KB.
 	maxLine = 1 << 20
 )
 
@@ -32,8 +27,6 @@ func NewClient(socketPath string) *Client {
 	return &Client{socketPath: socketPath}
 }
 
-// call sends one request and reads one response. Every method except
-// Subscribe goes through here.
 func (c *Client) call(method string, params any, out any) error {
 	conn, err := net.DialTimeout("unix", c.socketPath, dialTimeout)
 	if err != nil {
@@ -78,8 +71,6 @@ func newScanner(conn net.Conn) *bufio.Scanner {
 	return scanner
 }
 
-// decodeResponse unwraps the envelope. A daemon-side error becomes a Go
-// error; a payload is decoded into out when the caller wants one.
 func decodeResponse(line []byte, out any) error {
 	var resp Response
 	if err := json.Unmarshal(line, &resp); err != nil {
@@ -97,7 +88,7 @@ func decodeResponse(line []byte, out any) error {
 	return nil
 }
 
-// Snapshot is one round trip for everything a screen or a status bar needs.
+// Snapshot fetches the daemon's state in one round trip.
 func (c *Client) Snapshot() (*Snapshot, error) {
 	var snap Snapshot
 	if err := c.call(MethodSnapshot, nil, &snap); err != nil {
@@ -106,10 +97,8 @@ func (c *Client) Snapshot() (*Snapshot, error) {
 	return &snap, nil
 }
 
-// Subscribe opens a connection the daemon keeps writing to. The first
-// Snapshot arrives right away; another follows every time devices, events
-// or config change. The channel closes when ctx ends or the daemon goes
-// away, so a closed channel means "reconnect or show offline".
+// Subscribe streams snapshots, the first right away. The channel closes when
+// ctx ends or the daemon goes away.
 func (c *Client) Subscribe(ctx context.Context) (<-chan Snapshot, error) {
 	conn, err := net.DialTimeout("unix", c.socketPath, dialTimeout)
 	if err != nil {
@@ -125,7 +114,7 @@ func (c *Client) Subscribe(ctx context.Context) (<-chan Snapshot, error) {
 		defer close(ch)
 		defer conn.Close()
 
-		// Closing the socket is what unblocks the scanner when ctx ends.
+		// Closing the socket unblocks the scanner when ctx ends.
 		stop := context.AfterFunc(ctx, func() { conn.Close() })
 		defer stop()
 
@@ -145,8 +134,7 @@ func (c *Client) Subscribe(ctx context.Context) (<-chan Snapshot, error) {
 	return ch, nil
 }
 
-// SetDefault makes deviceID the default output. notify asks the daemon for a
-// desktop notification once it has switched.
+// SetDefault makes deviceID the default output, with a notification if notify.
 func (c *Client) SetDefault(deviceID string, notify bool) error {
 	return c.call(MethodSetDefault, SetDefaultParams{DeviceID: deviceID, Notify: notify}, nil)
 }

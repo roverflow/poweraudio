@@ -13,8 +13,7 @@ func TestParsePactlEvent(t *testing.T) {
 		{"Event 'remove' on sink #43", EventSinkRemoved, "43", true},
 		{"Event 'change' on sink #73", EventSinkChanged, "73", true},
 		{"Event 'change' on server #0", EventDefaultChanged, "0", true},
-		// A stream, not an output. These arrive whenever an application
-		// starts or stops playing and used to look like sink changes.
+		// A stream, not a sink.
 		{"Event 'change' on sink-input #52", 0, "", false},
 		{"Event 'new' on client #4779", 0, "", false},
 		{"Event 'change' on card #57", 0, "", false},

@@ -6,8 +6,6 @@ import (
 	"testing"
 )
 
-// exec runs one command line against a fake daemon and returns what the user
-// would have seen.
 func exec(client Client, args ...string) (code int, stdout, stderr string) {
 	var out, errOut bytes.Buffer
 	code = run(args, client, &out, &errOut)
@@ -296,8 +294,7 @@ func TestMutePrintsTheStateTheDaemonReports(t *testing.T) {
 		t.Errorf("stdout = %q, want %q", stdout, "muted\n")
 	}
 
-	// A daemon that refused the change keeps reporting the old state, and the
-	// command has to say so rather than echo the toggle it asked for.
+	// A refused toggle must print the state the daemon reports.
 	code, stdout, _ = exec(newFake(before, before), "mute")
 	if code != exitOK || stdout != "unmuted\n" {
 		t.Errorf("refused toggle printed %q with code %d, want %q", stdout, code, "unmuted\n")
