@@ -41,9 +41,14 @@ const (
 	// decides where the output should go instead.
 	disconnectSettle = 300 * time.Millisecond
 
-	// maxEvents is the size of the in-memory log the status screen reads. It
-	// keeps every level, so a debug line still costs a slot.
+	// maxEvents is the size of the in-memory log the status screen reads.
 	maxEvents = 200
+
+	// maxDebugEvents is how many of those slots debug lines may hold. An
+	// AirPlay speaker on the network adds and removes a sink every 17 minutes
+	// or so, and with no limit those lines pushed the switches and warnings
+	// out of the log within a day.
+	maxDebugEvents = 50
 
 	// quietStart is how long after startup a failure to open the Barracuda
 	// node is expected. The udev rule grants access when the login session
@@ -95,6 +100,11 @@ type Daemon struct {
 	claim *claim
 	// recentBT is when each Bluetooth device last connected, by MAC.
 	recentBT map[string]time.Time
+	// goneBT is when each Bluetooth device last disconnected, by MAC.
+	goneBT map[string]time.Time
+	// listed is true once the sink list has been read, so the first reading
+	// is not logged as every sink being added.
+	listed bool
 	// holding is true during a startup, sleep or resume hold.
 	holding bool
 	audio   probe.Report
@@ -141,6 +151,7 @@ func New(cfg config.Config, backend audio.Backend, configPath string) *Daemon {
 		configPath: configPath,
 		startTime:  time.Now(),
 		recentBT:   make(map[string]time.Time),
+		goneBT:     make(map[string]time.Time),
 		subs:       make(map[*subscriber]struct{}),
 		prober: func(ctx context.Context) probe.Report {
 			return probe.Run(ctx, probe.Exec)
@@ -538,6 +549,7 @@ func (d *Daemon) handleBluetoothEvent(ctx context.Context, ev bluetooth.Event) {
 		return
 	}
 
+	d.noteDisconnect(ev.MACAddress)
 	d.switcher.disconnected(ctx, ev.MACAddress)
 	if !sleepCtx(ctx, disconnectSettle) {
 		return
@@ -551,15 +563,11 @@ func (d *Daemon) handleBluetoothEvent(ctx context.Context, ev bluetooth.Event) {
 func (d *Daemon) handleAudioEvent(ctx context.Context, ev audio.Event) {
 	switch ev.Type {
 	case audio.EventSinkAdded:
-		before := d.GetDevices()
 		d.refreshSettled(ctx)
-		d.logSinkDiff("sink added", d.GetDevices(), before, ev.DeviceID)
 		d.switcher.retry(ctx)
 
 	case audio.EventSinkRemoved:
-		before := d.GetDevices()
 		d.refreshSettled(ctx)
-		d.logSinkDiff("sink removed", before, d.GetDevices(), ev.DeviceID)
 
 	case audio.EventDefaultChanged:
 		// Only the default moved, so one call to read it beats listing
@@ -575,18 +583,26 @@ func (d *Daemon) handleAudioEvent(ctx context.Context, ev audio.Event) {
 	}
 }
 
-// logSinkDiff names the sinks that appeared in one list and not the other. The
-// pactl event carries only the pulse index, which a sink list keyed by name
-// cannot be matched against, so the journal used to fill with lines like
-// "sink added: 1648" that said nothing about which device it was.
-func (d *Daemon) logSinkDiff(what string, have, missing []audio.Device, rawID string) {
-	seen := make(map[string]struct{}, len(missing))
-	for _, dev := range missing {
-		seen[dev.ID] = struct{}{}
+// logSinkChanges names the sinks that appeared and went away between two
+// reads of the list. It runs on every read rather than on the pactl event,
+// because the event carries only the pulse index, and the read that notices a
+// sink is often an earlier one: the Bluetooth handler or a default change gets
+// there first. Diffing around the event then found nothing, and the journal
+// filled with lines like "sink removed: 942" that named no device.
+func (d *Daemon) logSinkChanges(before, after []audio.Device) {
+	if added := missingFrom(after, before); len(added) > 0 {
+		d.debugf("sink added: %s", strings.Join(added, ", "))
 	}
+	if removed := missingFrom(before, after); len(removed) > 0 {
+		d.debugf("sink removed: %s", strings.Join(removed, ", "))
+	}
+}
+
+// missingFrom returns the names of the devices in have that other lacks.
+func missingFrom(have, other []audio.Device) []string {
 	var names []string
 	for _, dev := range have {
-		if _, ok := seen[dev.ID]; ok {
+		if deviceByID(other, dev.ID) != nil {
 			continue
 		}
 		name := dev.Name
@@ -595,11 +611,7 @@ func (d *Daemon) logSinkDiff(what string, have, missing []audio.Device, rawID st
 		}
 		names = append(names, name)
 	}
-	if len(names) == 0 {
-		d.debugf("%s: %s", what, rawID)
-		return
-	}
-	d.debugf("%s: %s", what, strings.Join(names, ", "))
+	return names
 }
 
 // handleEarcups records a Barracuda power report and moves the output.
@@ -714,8 +726,10 @@ func (d *Daemon) storeDevices(devices []audio.Device) {
 			}
 		}
 	}
-	changed := !slices.Equal(d.devices, devices)
+	before, listed := d.devices, d.listed
+	changed := !slices.Equal(before, devices)
 	d.devices = devices
+	d.listed = true
 
 	newDefault := ""
 	for _, dev := range devices {
@@ -726,13 +740,20 @@ func (d *Daemon) storeDevices(devices []audio.Device) {
 	}
 	// The first reading is where things are, not a change to announce.
 	moved := newDefault != "" && d.lastDefaultID != "" && newDefault != d.lastDefaultID
+	var from departure
+	if moved {
+		from = departureOf(d.lastDefaultID, before, devices)
+	}
 	if newDefault != "" {
 		d.lastDefaultID = newDefault
 	}
 	d.mu.Unlock()
 
+	if listed {
+		d.logSinkChanges(before, devices)
+	}
 	if moved {
-		d.defaultMoved(newDefault)
+		d.defaultMoved(newDefault, from)
 	}
 	if changed {
 		d.changed()

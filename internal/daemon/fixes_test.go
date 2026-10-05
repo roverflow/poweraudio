@@ -302,6 +302,62 @@ func TestNotificationsByReason(t *testing.T) {
 		}
 	})
 
+	// WirePlumber moves the output off a headset within a second of it
+	// disconnecting, before the daemon's own fallback runs.
+	t.Run("session manager falls back after a disconnect", func(t *testing.T) {
+		backend := &stubBackend{current: jblID, devices: []audio.Device{
+			{ID: "ryzen", Name: "Ryzen", Available: true},
+			jbl(),
+		}}
+		d, rec := testDaemon(t, backend, nil)
+		backend.remove(jblID)
+		backend.setCurrent("ryzen")
+		disconnect(ctx, d, jblMAC, "JBL Tune 520BT")
+
+		if n := rec.got(); len(n) != 1 || n[0].Body != reasonFallback.body() {
+			t.Errorf("notices = %+v, want one fallback notice", n)
+		}
+		want := "default device changed to Ryzen after JBL Tune 520BT went away"
+		if got := hasLevel(d, ipc.LevelInfo); !slices.Contains(got, want) {
+			t.Errorf("info lines = %q, want %q", got, want)
+		}
+	})
+
+	// The default can move while the headset's sink is still listed for a
+	// moment after the link dropped.
+	t.Run("session manager falls back before the sink goes", func(t *testing.T) {
+		backend := &stubBackend{current: jblID, devices: []audio.Device{
+			{ID: "ryzen", Name: "Ryzen", Available: true},
+			jbl(),
+		}}
+		d, rec := testDaemon(t, backend, nil)
+		d.noteDisconnect(jblMAC)
+		backend.setCurrent("ryzen")
+		d.handleAudioEvent(ctx, audio.Event{Type: audio.EventDefaultChanged})
+
+		if n := rec.got(); len(n) != 1 || n[0].Body != reasonFallback.body() {
+			t.Errorf("notices = %+v, want one fallback notice", n)
+		}
+	})
+
+	// A headset that was not playing says nothing about a change made just
+	// after it left.
+	t.Run("external after an idle headset leaves", func(t *testing.T) {
+		backend := &stubBackend{current: "ryzen", devices: []audio.Device{
+			{ID: "ryzen", Name: "Ryzen", Available: true},
+			{ID: "hdmi", Name: "HDMI", Available: true},
+			jbl(),
+		}}
+		d, rec := testDaemon(t, backend, nil)
+		d.noteDisconnect(jblMAC)
+		backend.setCurrent("hdmi")
+		d.handleAudioEvent(ctx, audio.Event{Type: audio.EventDefaultChanged})
+
+		if n := rec.got(); len(n) != 1 || n[0].Body != reasonExternal.body() {
+			t.Errorf("notices = %+v, want one for a change made elsewhere", n)
+		}
+	})
+
 	t.Run("external with on_device_change off", func(t *testing.T) {
 		backend := rankedSinks(t, "barracuda")
 		d, rec := testDaemon(t, backend, func(c *config.Config) { c.Notifications.OnDeviceChange = false })

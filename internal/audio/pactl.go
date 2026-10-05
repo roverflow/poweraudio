@@ -168,7 +168,7 @@ func deviceFrom(s pactlSink, defaultName string) Device {
 		// entry or a pending switch aimed at an id went stale the moment the
 		// device came back.
 		ID:          s.Name,
-		Name:        s.Description,
+		Name:        displayName(s),
 		Description: s.Name,
 		Type:        classify(s),
 		IsDefault:   s.Name == defaultName,
@@ -185,17 +185,45 @@ func deviceFrom(s pactlSink, defaultName string) Device {
 	return dev
 }
 
-// isVirtual reports a sink with no hardware behind it. PipeWire marks null
-// sinks with the null-audio-sink factory or node.virtual, filters carry a
-// device.class of filter, and plain PulseAudio calls its null sink abstract.
-// A sink that publishes none of these is treated as hardware, which is what
-// every sink was before this check existed.
+// displayName is the description a person reads. pactl prints "(null)" when
+// a sink has none, which is what PipeWire's AirPlay discovery creates for a
+// speaker that announces no name, and the list showed a device called
+// "(null)". The sink name still says what it is.
+func displayName(s pactlSink) string {
+	desc := strings.TrimSpace(s.Description)
+	if desc == "" || desc == "(null)" {
+		return s.Name
+	}
+	return desc
+}
+
+// networkSinkPrefixes are the names the network modules give their sinks when
+// the server publishes none of the properties isVirtual checks. PipeWire's
+// AirPlay discovery uses raop_sink, and PulseAudio uses raop_output for
+// AirPlay and tunnel for a sink on another machine.
+var networkSinkPrefixes = []string{"raop_sink.", "raop_output.", "tunnel.", "tunnel-sink."}
+
+// isVirtual reports a sink with no local hardware behind it. PipeWire marks
+// null sinks with the null-audio-sink factory or node.virtual, and sinks that
+// send audio over the network (AirPlay, RTP, VBAN, a PulseAudio tunnel) with
+// node.network. Filters carry a device.class of filter, and plain PulseAudio
+// calls its null sink abstract. A sink that publishes none of these is treated
+// as hardware, which is what every sink was before this check existed.
+//
+// A network sink counts because the fallback must not pick it on its own. An
+// AirPlay speaker discovered on the LAN appears for a few seconds at a time,
+// and audio sent there plays in whatever room that speaker is in.
 func isVirtual(s pactlSink) bool {
 	if s.Name == PlaceholderID {
 		return true
 	}
-	if s.Properties["node.virtual"] == "true" {
+	if s.Properties["node.virtual"] == "true" || s.Properties["node.network"] == "true" {
 		return true
+	}
+	for _, prefix := range networkSinkPrefixes {
+		if strings.HasPrefix(s.Name, prefix) {
+			return true
+		}
 	}
 	if s.Properties["factory.name"] == "support.null-audio-sink" {
 		return true

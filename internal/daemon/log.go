@@ -4,14 +4,16 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/roverflow/poweraudio/internal/ipc"
 )
 
 // The in-memory ring keeps every level so the status screen can show what the
-// daemon was doing. general.log_level only decides what reaches stderr, which
-// systemd captures, and the optional log file.
+// daemon was doing, with debug lines held to maxDebugEvents of its slots.
+// general.log_level only decides what reaches stderr, which systemd captures,
+// and the optional log file.
 
 func (d *Daemon) debugf(format string, args ...any) { d.logf(ipc.LevelDebug, format, args...) }
 func (d *Daemon) infof(format string, args ...any)  { d.logf(ipc.LevelInfo, format, args...) }
@@ -26,10 +28,7 @@ func (d *Daemon) logf(level ipc.Level, format string, args ...any) {
 	}
 
 	d.mu.Lock()
-	d.events = append(d.events, entry)
-	if len(d.events) > maxEvents {
-		d.events = d.events[len(d.events)-maxEvents:]
-	}
+	d.events = appendEvent(d.events, entry)
 	threshold := d.cfg.General.LogLevel
 	d.mu.Unlock()
 
@@ -37,6 +36,31 @@ func (d *Daemon) logf(level ipc.Level, format string, args ...any) {
 		d.write(entry)
 	}
 	d.changed()
+}
+
+// appendEvent adds entry to the ring. A debug line past maxDebugEvents pushes
+// out the oldest debug line rather than the oldest line of any level, so a
+// noisy device cannot crowd the switches and warnings out of the log.
+func appendEvent(events []ipc.EventLog, entry ipc.EventLog) []ipc.EventLog {
+	events = append(events, entry)
+	if entry.Level == ipc.LevelDebug {
+		debug, oldest := 0, -1
+		for i, ev := range events {
+			if ev.Level == ipc.LevelDebug {
+				if oldest < 0 {
+					oldest = i
+				}
+				debug++
+			}
+		}
+		if debug > maxDebugEvents {
+			events = slices.Delete(events, oldest, oldest+1)
+		}
+	}
+	if len(events) > maxEvents {
+		events = events[len(events)-maxEvents:]
+	}
+	return events
 }
 
 // write puts one line on stderr and, when general.log_file is set, the same

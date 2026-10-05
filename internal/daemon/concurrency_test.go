@@ -3,11 +3,13 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
 	"github.com/roverflow/poweraudio/internal/audio"
 	"github.com/roverflow/poweraudio/internal/config"
+	"github.com/roverflow/poweraudio/internal/ipc"
 )
 
 // stubBackend is enough of an audio.Backend to drive the daemon without a
@@ -217,5 +219,37 @@ func TestEventLogIsBounded(t *testing.T) {
 	// first on the status screen.
 	if got := events[len(events)-1].Message; got != "event 599" {
 		t.Errorf("newest event = %q, want the last one logged", got)
+	}
+}
+
+// An AirPlay speaker adding and removing a sink every few minutes used to
+// push every switch and warning out of the log within a day.
+func TestDebugLinesCannotCrowdOutTheLog(t *testing.T) {
+	d := New(config.DefaultConfig(), &stubBackend{}, t.TempDir()+"/config.toml")
+	for i := 0; i < 20; i++ {
+		d.infof("switch %d", i)
+	}
+	for i := 0; i < maxEvents*3; i++ {
+		d.debugf("sink added: %d", i)
+	}
+
+	var info, debug int
+	for _, ev := range d.Snapshot().Events {
+		switch ev.Level {
+		case ipc.LevelInfo:
+			info++
+		case ipc.LevelDebug:
+			debug++
+		}
+	}
+	if info != 20 {
+		t.Errorf("kept %d info lines, want all 20", info)
+	}
+	if debug != maxDebugEvents {
+		t.Errorf("kept %d debug lines, want %d", debug, maxDebugEvents)
+	}
+	events := d.Snapshot().Events
+	if got := events[len(events)-1].Message; got != fmt.Sprintf("sink added: %d", maxEvents*3-1) {
+		t.Errorf("newest event = %q, want the last debug line", got)
 	}
 }

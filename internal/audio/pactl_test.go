@@ -593,6 +593,11 @@ func TestVirtualSinks(t *testing.T) {
 		{"node.virtual", pactlSink{Name: "combined", Properties: map[string]string{"node.virtual": "true"}}, true},
 		{"PulseAudio null sink", pactlSink{Name: "null", Properties: map[string]string{"device.class": "abstract"}}, true},
 		{"filter chain", pactlSink{Name: "effect_input.eq", Properties: map[string]string{"device.class": "filter"}}, true},
+		{"AirPlay speaker", pactlSink{Name: "raop_sink.Living-Room.local.192.168.1.20.7000", Properties: map[string]string{"node.network": "true"}}, true},
+		{"AirPlay named only", pactlSink{Name: "raop_sink.tv.local.192.168.1.30.7000"}, true},
+		{"PulseAudio AirPlay", pactlSink{Name: "raop_output.kitchen.local"}, true},
+		{"PulseAudio tunnel", pactlSink{Name: "tunnel.desktop.local.alsa_output.pci-0000_00_1f.3.analog-stereo"}, true},
+		{"RTP sink", pactlSink{Name: "rtp-sink", Properties: map[string]string{"node.network": "true"}}, true},
 		{"ALSA card", pactlSink{Name: "alsa_output.pci-0000_0e_00.6.analog-stereo", Properties: map[string]string{
 			"device.class": "sound", "factory.name": "api.alsa.pcm.sink", "device.api": "alsa"}}, false},
 		{"no properties at all", pactlSink{Name: "alsa_output.usb"}, false},
@@ -607,5 +612,24 @@ func TestVirtualSinks(t *testing.T) {
 	}
 	if (Device{ID: PlaceholderID, Available: true}).Usable() {
 		t.Error("the placeholder counted as usable")
+	}
+}
+
+// PipeWire's AirPlay discovery creates a sink with no description for a
+// speaker that announces no name, and pactl prints that as "(null)".
+func TestDisplayNameFallsBackToSinkName(t *testing.T) {
+	cases := []struct {
+		desc, want string
+	}{
+		{"Ryzen HD Audio Controller Analog Stereo", "Ryzen HD Audio Controller Analog Stereo"},
+		{"(null)", "raop_sink.tv.local.192.168.1.30.7000"},
+		{"", "raop_sink.tv.local.192.168.1.30.7000"},
+		{"  ", "raop_sink.tv.local.192.168.1.30.7000"},
+	}
+	for _, c := range cases {
+		dev := deviceFrom(pactlSink{Name: "raop_sink.tv.local.192.168.1.30.7000", Description: c.desc}, "")
+		if dev.Name != c.want {
+			t.Errorf("description %q: Name = %q, want %q", c.desc, dev.Name, c.want)
+		}
 	}
 }

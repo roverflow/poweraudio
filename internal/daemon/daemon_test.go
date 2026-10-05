@@ -87,11 +87,40 @@ func TestSinkEventsLogDeviceNames(t *testing.T) {
 		t.Errorf("sink removed logged %q, want the name of the sink that vanished", last.Message)
 	}
 
-	// Nothing moved, so there is no name to report and the raw id is all the
-	// daemon knows.
+	// Nothing moved, so there is nothing to say.
+	before := len(d.Snapshot().Events)
 	d.handleAudioEvent(ctx, audio.Event{Type: audio.EventSinkAdded, DeviceID: "1648"})
-	if last := lastEvent(t, d); !strings.Contains(last.Message, "1648") {
-		t.Errorf("sink added with no list change logged %q, want the raw id", last.Message)
+	if got := d.Snapshot().Events[before:]; len(got) != 0 {
+		t.Errorf("an event that changed nothing logged %+v", got)
+	}
+}
+
+// The Bluetooth handler reads the list before pactl's remove event arrives, so
+// diffing around the event found nothing and logged "sink removed: 942".
+func TestSinkNamedWhenAnEarlierReadSawItGo(t *testing.T) {
+	backend := &stubBackend{current: "ryzen", devices: []audio.Device{
+		{ID: "ryzen", Name: "Ryzen", Available: true},
+		jbl(),
+	}}
+	d := New(config.DefaultConfig(), backend, filepath.Join(t.TempDir(), "config.toml"))
+	ctx := context.Background()
+	d.refreshDevices(ctx)
+	if got := hasLevel(d, ipc.LevelDebug); len(got) != 0 {
+		t.Errorf("the first read logged %q, want nothing", got)
+	}
+
+	backend.remove(jblID)
+	d.refreshDevices(ctx)
+	d.handleAudioEvent(ctx, audio.Event{Type: audio.EventSinkRemoved, DeviceID: "942"})
+
+	var lines []string
+	for _, msg := range hasLevel(d, ipc.LevelDebug) {
+		if strings.HasPrefix(msg, "sink ") {
+			lines = append(lines, msg)
+		}
+	}
+	if len(lines) != 1 || lines[0] != "sink removed: JBL Tune 520BT" {
+		t.Errorf("sink lines = %q, want one naming the headset", lines)
 	}
 }
 

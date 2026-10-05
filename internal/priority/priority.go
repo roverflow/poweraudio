@@ -54,8 +54,9 @@ func Rank(dev audio.Device, entries []config.PriorityEntry) int {
 //
 // The "Dummy Output" placeholder is never returned, even when an entry names
 // it: PipeWire refuses to make it the default and nothing plays through it. A
-// virtual sink, such as an EasyEffects chain or a null sink, is returned only
-// when the ranking names it, since audio sent there goes nowhere on its own.
+// virtual sink, such as an EasyEffects chain, a null sink or an AirPlay
+// speaker, is returned only when the ranking names it, since audio sent there
+// goes nowhere on its own or plays in another room.
 func Best(devices []audio.Device, entries []config.PriorityEntry) *audio.Device {
 	for _, entry := range entries {
 		for i := range devices {

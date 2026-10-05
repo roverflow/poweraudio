@@ -53,10 +53,11 @@ type Device struct {
 	// server did not say.
 	VendorID  uint16 `json:"vendor_id,omitempty"`
 	ProductID uint16 `json:"product_id,omitempty"`
-	// Virtual is a sink with no hardware behind it: a null sink, a filter
-	// chain such as EasyEffects, a combine sink, or the placeholder below.
-	// The fallback and `next` pass over one unless the ranking names it,
-	// because audio sent there only comes out if something else carries it on.
+	// Virtual is a sink with no local hardware behind it: a null sink, a
+	// filter chain such as EasyEffects, a combine sink, a network sink such as
+	// an AirPlay speaker, or the placeholder below. The fallback and `next`
+	// pass over one unless the ranking names it, because audio sent there
+	// either goes nowhere on its own or plays on a speaker in another room.
 	Virtual bool `json:"virtual,omitempty"`
 }
 
